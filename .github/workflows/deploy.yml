@@ -50,7 +50,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # IAM Role and Instance Profile for EC2
+    # IAM Role and Instance Profile
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role
       run: |
@@ -111,7 +111,7 @@ jobs:
           sleep 5
         done
 
-    # IAM Role for CodeDeploy
+    # CodeDeploy IAM Role
     - name: Create CodeDeploy IAM Role
       run: |
         cat > codedeploy-trust-policy.json << EOF
@@ -197,14 +197,17 @@ jobs:
           --output text)
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
-    # Launch EC2 with MongoDB Authentication
+    # Launch EC2 Instance
     - name: Launch EC2 Instance
       id: launch-instance
+      env:
+        GH_USERNAME: ${{ secrets.GH_USERNAME }}
+        GH_PAT: ${{ secrets.GH_PAT }}
       run: |
         cat > user-data.sh << 'EOF'
         #!/bin/bash
         sudo apt-get update -y
-        sudo apt-get install -y ruby wget curl gnupg
+        sudo apt-get install -y ruby wget curl gnupg git
 
         # CodeDeploy Agent
         cd /home/ubuntu
@@ -224,32 +227,29 @@ jobs:
         sudo apt-get install -y mongodb-org
         sudo systemctl enable mongod
         sudo systemctl start mongod
-
-        # Wait for MongoDB
         sleep 10
 
-        # Create Users
+        # Create MongoDB users
         mongosh <<EOF2
         use admin
-        db.createUser({
-          user: "admin",
-          pwd: "admin",
-          roles: ["userAdminAnyDatabase", "dbAdminAnyDatabase", "readWriteAnyDatabase"]
-        });
-
+        db.createUser({user: "admin", pwd: "admin", roles: ["userAdminAnyDatabase", "dbAdminAnyDatabase", "readWriteAnyDatabase"]});
         use vrseBuilder
-        db.createUser({
-          user: "admin",
-          pwd: "admin",
-          roles: ["userAdmin", "dbAdmin", "readWrite"]
-        });
+        db.createUser({user: "admin", pwd: "admin", roles: ["userAdmin", "dbAdmin", "readWrite"]});
         EOF2
 
-        # Enable authentication
         sudo sed -i '/#security:/a\security:\n  authorization: "enabled"' /etc/mongod.conf
         sudo systemctl restart mongod
 
-        # Verify
+        # Clone GitHub project
+        GH_USER="${GH_USERNAME}"
+        GH_TOKEN="${GH_PAT}"
+        REPO_NAME="your-repository"   # Change this
+        BRANCH="main"
+
+        cd /home/ubuntu
+        sudo git clone -b $BRANCH https://$GH_USER:$GH_TOKEN@github.com/$GH_USER/$REPO_NAME.git
+        sudo chown -R ubuntu:ubuntu $REPO_NAME
+
         node -v
         npm -v
         mongod --version
@@ -270,7 +270,7 @@ jobs:
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
         aws ec2 wait instance-running --instance-ids $INSTANCE_ID
 
-    # Allocate and Associate Elastic IP
+    # Allocate Elastic IP
     - name: Allocate and Associate Elastic IP
       id: elastic-ip
       run: |
@@ -287,17 +287,13 @@ jobs:
           --output text)
         echo "ELASTIC_IP=$ELASTIC_IP" >> $GITHUB_OUTPUT
 
-    # Summary
     - name: Summary
       run: |
         echo "## 🚀 Infrastructure Setup Complete!" >> $GITHUB_STEP_SUMMARY
-        echo "- **EC2 Instance ID**: ${{ steps.launch-instance.outputs.INSTANCE_ID }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Elastic IP**: ${{ steps.elastic-ip.outputs.ELASTIC_IP }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Key Pair**: ${{ steps.create-key.outputs.KEY_NAME }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔑 SSH Command:" >> $GITHUB_STEP_SUMMARY
         echo "\`ssh -i ec2-private-key/${{ steps.create-key.outputs.KEY_NAME }}.pem ubuntu@${{ steps.elastic-ip.outputs.ELASTIC_IP }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
         echo "### MongoDB Connection String:" >> $GITHUB_STEP_SUMMARY
         echo "\`mongodb://admin:admin@localhost:27017/vrseBuilder\`" >> $GITHUB_STEP_SUMMARY
 

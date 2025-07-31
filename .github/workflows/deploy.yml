@@ -32,6 +32,12 @@ env:
 jobs:
   setup-infrastructure:
     runs-on: ubuntu-latest
+    outputs:
+      INSTANCE_ID: ${{ steps.launch-instance.outputs.INSTANCE_ID }}
+      KEY_NAME: ${{ steps.create-key.outputs.KEY_NAME }}
+      SECURITY_GROUP_ID: ${{ steps.create-sg.outputs.SECURITY_GROUP_ID }}
+      ELASTIC_IP: ${{ steps.elastic-ip.outputs.ELASTIC_IP }}
+      ALLOCATION_ID: ${{ steps.elastic-ip.outputs.ALLOCATION_ID }}
 
     steps:
     - name: Checkout code
@@ -76,12 +82,10 @@ jobs:
             --policy-arn arn:aws:iam::aws:policy/AmazonEC2RoleforAWSCodeDeploy
         fi
 
-        # Create instance profile if missing
         if ! aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
           aws iam create-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }}
         fi
 
-        # Attach role to instance profile if not already attached
         ATTACHED_ROLE=$(aws iam get-instance-profile \
           --instance-profile-name ${{ env.EC2_ROLE_NAME }} \
           --query 'InstanceProfile.Roles[0].RoleName' \
@@ -223,22 +227,72 @@ jobs:
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
         aws ec2 wait instance-running --instance-ids $INSTANCE_ID
 
-        PUBLIC_IP=$(aws ec2 describe-instances \
-          --instance-ids $INSTANCE_ID \
-          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+    # ------------------ Allocate and Associate Elastic IP ------------------
+    - name: Allocate and Associate Elastic IP
+      id: elastic-ip
+      run: |
+        ALLOCATION_ID=$(aws ec2 allocate-address \
+          --domain vpc \
+          --query 'AllocationId' \
           --output text)
-        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
+        echo "ALLOCATION_ID=$ALLOCATION_ID" >> $GITHUB_OUTPUT
+
+        aws ec2 associate-address \
+          --instance-id ${{ steps.launch-instance.outputs.INSTANCE_ID }} \
+          --allocation-id $ALLOCATION_ID
+
+        ELASTIC_IP=$(aws ec2 describe-addresses \
+          --allocation-ids $ALLOCATION_ID \
+          --query 'Addresses[0].PublicIp' \
+          --output text)
+        echo "ELASTIC_IP=$ELASTIC_IP" >> $GITHUB_OUTPUT
 
     # ------------------ Summary ------------------
     - name: Summary
       run: |
         echo "## 🚀 Infrastructure Setup Complete!" >> $GITHUB_STEP_SUMMARY
-        echo "- **EC2 IAM Role**: ${{ env.EC2_ROLE_NAME }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **CodeDeploy IAM Role**: ${{ env.CODEDEPLOY_ROLE_NAME }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Security Group**: ${{ steps.create-sg.outputs.SECURITY_GROUP_ID }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **EC2 Instance**: ${{ steps.launch-instance.outputs.INSTANCE_ID }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Public IP**: ${{ steps.launch-instance.outputs.PUBLIC_IP }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **EC2 Instance ID**: ${{ steps.launch-instance.outputs.INSTANCE_ID }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Elastic IP**: ${{ steps.elastic-ip.outputs.ELASTIC_IP }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Key Pair**: ${{ steps.create-key.outputs.KEY_NAME }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### SSH Command:" >> $GITHUB_STEP_SUMMARY
-        echo "\`ssh -i ec2-private-key/<downloaded-pem-file> ubuntu@${{ steps.launch-instance.outputs.PUBLIC_IP }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔑 SSH Command:" >> $GITHUB_STEP_SUMMARY
+        echo "\`ssh -i ec2-private-key/${{ steps.create-key.outputs.KEY_NAME }}.pem ubuntu@${{ steps.elastic-ip.outputs.ELASTIC_IP }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ------------------ Cleanup on Failure ------------------
+  cleanup-on-failure:
+    runs-on: ubuntu-latest
+    needs: setup-infrastructure
+    if: failure()
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Cleanup AWS resources
+      run: |
+        echo "Cleaning up resources due to failure..."
+        INSTANCE_ID="${{ needs.setup-infrastructure.outputs.INSTANCE_ID }}"
+        KEY_NAME="${{ needs.setup-infrastructure.outputs.KEY_NAME }}"
+        SG_ID="${{ needs.setup-infrastructure.outputs.SECURITY_GROUP_ID }}"
+        ALLOCATION_ID="${{ needs.setup-infrastructure.outputs.ALLOCATION_ID }}"
+
+        if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+          aws ec2 terminate-instances --instance-ids "$INSTANCE_ID"
+        fi
+
+        if [ -n "$KEY_NAME" ] && [ "$KEY_NAME" != "None" ]; then
+          aws ec2 delete-key-pair --key-name "$KEY_NAME"
+        fi
+
+        if [ -n "$ALLOCATION_ID" ] && [ "$ALLOCATION_ID" != "None" ]; then
+          aws ec2 release-address --allocation-id "$ALLOCATION_ID"
+        fi
+
+        if [ -n "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
+          aws ec2 delete-security-group --group-id "$SG_ID"
+        fi
+
+        echo "Cleanup completed."

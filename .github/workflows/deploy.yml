@@ -50,7 +50,6 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # IAM Role for EC2
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role
       run: |
@@ -111,7 +110,6 @@ jobs:
           sleep 5
         done
 
-    # CodeDeploy IAM Role
     - name: Create CodeDeploy IAM Role
       run: |
         cat > codedeploy-trust-policy.json << EOF
@@ -138,7 +136,6 @@ jobs:
             --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
         fi
 
-    # Security Group
     - name: Create Security Group
       id: create-sg
       run: |
@@ -167,7 +164,6 @@ jobs:
           echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
         fi
 
-    # Create EC2 Key Pair
     - name: Create EC2 Key Pair
       id: create-key
       run: |
@@ -186,7 +182,6 @@ jobs:
         name: ec2-private-key
         path: ${{ steps.create-key.outputs.KEY_NAME }}.pem
 
-    # Get AMI
     - name: Get Latest Ubuntu AMI
       id: get-ami
       run: |
@@ -197,7 +192,6 @@ jobs:
           --output text)
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
-    # Launch EC2 Instance
     - name: Launch EC2 Instance
       id: launch-instance
       env:
@@ -243,7 +237,7 @@ jobs:
         # Clone GitHub project
         GH_USER="${GH_USERNAME}"
         GH_TOKEN="${GH_PAT}"
-        REPO_NAME="your-repository"  # Change this
+        REPO_NAME="your-repository"
         BRANCH="main"
 
         cd /home/ubuntu
@@ -261,8 +255,16 @@ jobs:
         echo 'export ENV_VAR2="val2"' | sudo tee -a /etc/profile
         source /etc/profile
 
-        # Start app (adjust this command to your start script)
-        npm start &
+        # Install PM2 globally and start app
+        sudo npm install -g pm2
+        pm2 start server.js --name "my-app" --update-env
+        pm2 startup systemd -u ubuntu --hp /home/ubuntu
+        pm2 save
+
+        node -v
+        npm -v
+        mongod --version
+        pm2 status
         EOF
 
         INSTANCE_ID=$(aws ec2 run-instances \
@@ -280,7 +282,6 @@ jobs:
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
         aws ec2 wait instance-running --instance-ids $INSTANCE_ID
 
-    # Allocate Elastic IP
     - name: Allocate and Associate Elastic IP
       id: elastic-ip
       run: |

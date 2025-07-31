@@ -50,7 +50,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # IAM Role and Instance Profile
+    # IAM Role for EC2
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role
       run: |
@@ -243,16 +243,26 @@ jobs:
         # Clone GitHub project
         GH_USER="${GH_USERNAME}"
         GH_TOKEN="${GH_PAT}"
-        REPO_NAME="your-repository"   # Change this
+        REPO_NAME="your-repository"  # Change this
         BRANCH="main"
 
         cd /home/ubuntu
         sudo git clone -b $BRANCH https://$GH_USER:$GH_TOKEN@github.com/$GH_USER/$REPO_NAME.git
         sudo chown -R ubuntu:ubuntu $REPO_NAME
 
-        node -v
-        npm -v
-        mongod --version
+        # Checkout branch and install dependencies
+        cd /home/ubuntu/$REPO_NAME
+        git fetch origin
+        git checkout $BRANCH
+        npm install
+
+        # Set environment variables
+        echo 'export ENV_VAR1="val1"' | sudo tee -a /etc/profile
+        echo 'export ENV_VAR2="val2"' | sudo tee -a /etc/profile
+        source /etc/profile
+
+        # Start app (adjust this command to your start script)
+        npm start &
         EOF
 
         INSTANCE_ID=$(aws ec2 run-instances \
@@ -296,41 +306,3 @@ jobs:
         echo "\`ssh -i ec2-private-key/${{ steps.create-key.outputs.KEY_NAME }}.pem ubuntu@${{ steps.elastic-ip.outputs.ELASTIC_IP }}\`" >> $GITHUB_STEP_SUMMARY
         echo "### MongoDB Connection String:" >> $GITHUB_STEP_SUMMARY
         echo "\`mongodb://admin:admin@localhost:27017/vrseBuilder\`" >> $GITHUB_STEP_SUMMARY
-
-  cleanup-on-failure:
-    runs-on: ubuntu-latest
-    needs: setup-infrastructure
-    if: failure()
-    steps:
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Cleanup AWS resources
-      run: |
-        echo "Cleaning up resources..."
-        INSTANCE_ID="${{ needs.setup-infrastructure.outputs.INSTANCE_ID }}"
-        KEY_NAME="${{ needs.setup-infrastructure.outputs.KEY_NAME }}"
-        SG_ID="${{ needs.setup-infrastructure.outputs.SECURITY_GROUP_ID }}"
-        ALLOCATION_ID="${{ needs.setup-infrastructure.outputs.ALLOCATION_ID }}"
-
-        if [ -n "$INSTANCE_ID" ]; then
-          aws ec2 terminate-instances --instance-ids "$INSTANCE_ID"
-        fi
-
-        if [ -n "$KEY_NAME" ]; then
-          aws ec2 delete-key-pair --key-name "$KEY_NAME"
-        fi
-
-        if [ -n "$ALLOCATION_ID" ]; then
-          aws ec2 release-address --allocation-id "$ALLOCATION_ID"
-        fi
-
-        if [ -n "$SG_ID" ]; then
-          aws ec2 delete-security-group --group-id "$SG_ID"
-        fi
-
-        echo "Cleanup done."

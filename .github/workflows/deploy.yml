@@ -197,19 +197,29 @@ jobs:
           --output text)
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
-    # ------------------ Launch EC2 ------------------
+    # ------------------ Launch EC2 with Node.js ------------------
     - name: Launch EC2 Instance
       id: launch-instance
       run: |
         cat > user-data.sh << 'EOF'
         #!/bin/bash
-        apt-get update
-        apt-get install -y ruby wget
+        sudo apt-get update -y
+        sudo apt-get install -y ruby wget curl
+
+        # Install CodeDeploy Agent
         cd /home/ubuntu
-        wget https://aws-codedeploy-${{ env.AWS_REGION }}.s3.${{ env.AWS_REGION }}.amazonaws.com/latest/install
+        wget https://aws-codedeploy-${AWS_REGION}.s3.${AWS_REGION}.amazonaws.com/latest/install
         chmod +x ./install
         ./install auto
-        service codedeploy-agent start
+        sudo service codedeploy-agent start
+
+        # Install Node.js and npm (Option 3)
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+
+        # Verify Node.js and npm
+        node -v
+        npm -v
         EOF
 
         INSTANCE_ID=$(aws ec2 run-instances \

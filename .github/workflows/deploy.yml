@@ -50,7 +50,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # ------------------ EC2 IAM Role + Instance Profile ------------------
+    # IAM Role and Instance Profile for EC2
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role
       run: |
@@ -111,7 +111,7 @@ jobs:
           sleep 5
         done
 
-    # ------------------ CodeDeploy IAM Role ------------------
+    # IAM Role for CodeDeploy
     - name: Create CodeDeploy IAM Role
       run: |
         cat > codedeploy-trust-policy.json << EOF
@@ -138,7 +138,7 @@ jobs:
             --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
         fi
 
-    # ------------------ Security Group ------------------
+    # Security Group
     - name: Create Security Group
       id: create-sg
       run: |
@@ -167,7 +167,7 @@ jobs:
           echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
         fi
 
-    # ------------------ Create Key Pair ------------------
+    # Create EC2 Key Pair
     - name: Create EC2 Key Pair
       id: create-key
       run: |
@@ -186,7 +186,7 @@ jobs:
         name: ec2-private-key
         path: ${{ steps.create-key.outputs.KEY_NAME }}.pem
 
-    # ------------------ Get AMI ------------------
+    # Get AMI
     - name: Get Latest Ubuntu AMI
       id: get-ami
       run: |
@@ -197,7 +197,7 @@ jobs:
           --output text)
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
-    # ------------------ Launch EC2 with Node.js + MongoDB ------------------
+    # Launch EC2 with MongoDB Authentication
     - name: Launch EC2 Instance
       id: launch-instance
       run: |
@@ -206,18 +206,18 @@ jobs:
         sudo apt-get update -y
         sudo apt-get install -y ruby wget curl gnupg
 
-        # Install CodeDeploy Agent
+        # CodeDeploy Agent
         cd /home/ubuntu
         wget https://aws-codedeploy-${AWS_REGION}.s3.${AWS_REGION}.amazonaws.com/latest/install
         chmod +x ./install
         ./install auto
         sudo service codedeploy-agent start
 
-        # Install Node.js and npm (Option 3)
+        # Node.js and npm
         curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
         sudo apt-get install -y nodejs
 
-        # Install MongoDB
+        # MongoDB
         curl -fsSL https://pgp.mongodb.com/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
         echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
         sudo apt-get update -y
@@ -225,7 +225,31 @@ jobs:
         sudo systemctl enable mongod
         sudo systemctl start mongod
 
-        # Verify installations
+        # Wait for MongoDB
+        sleep 10
+
+        # Create Users
+        mongosh <<EOF2
+        use admin
+        db.createUser({
+          user: "admin",
+          pwd: "admin",
+          roles: ["userAdminAnyDatabase", "dbAdminAnyDatabase", "readWriteAnyDatabase"]
+        });
+
+        use vrseBuilder
+        db.createUser({
+          user: "admin",
+          pwd: "admin",
+          roles: ["userAdmin", "dbAdmin", "readWrite"]
+        });
+        EOF2
+
+        # Enable authentication
+        sudo sed -i '/#security:/a\security:\n  authorization: "enabled"' /etc/mongod.conf
+        sudo systemctl restart mongod
+
+        # Verify
         node -v
         npm -v
         mongod --version
@@ -246,14 +270,11 @@ jobs:
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
         aws ec2 wait instance-running --instance-ids $INSTANCE_ID
 
-    # ------------------ Allocate and Associate Elastic IP ------------------
+    # Allocate and Associate Elastic IP
     - name: Allocate and Associate Elastic IP
       id: elastic-ip
       run: |
-        ALLOCATION_ID=$(aws ec2 allocate-address \
-          --domain vpc \
-          --query 'AllocationId' \
-          --output text)
+        ALLOCATION_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
         echo "ALLOCATION_ID=$ALLOCATION_ID" >> $GITHUB_OUTPUT
 
         aws ec2 associate-address \
@@ -266,7 +287,7 @@ jobs:
           --output text)
         echo "ELASTIC_IP=$ELASTIC_IP" >> $GITHUB_OUTPUT
 
-    # ------------------ Summary ------------------
+    # Summary
     - name: Summary
       run: |
         echo "## 🚀 Infrastructure Setup Complete!" >> $GITHUB_STEP_SUMMARY
@@ -276,8 +297,10 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔑 SSH Command:" >> $GITHUB_STEP_SUMMARY
         echo "\`ssh -i ec2-private-key/${{ steps.create-key.outputs.KEY_NAME }}.pem ubuntu@${{ steps.elastic-ip.outputs.ELASTIC_IP }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### MongoDB Connection String:" >> $GITHUB_STEP_SUMMARY
+        echo "\`mongodb://admin:admin@localhost:27017/vrseBuilder\`" >> $GITHUB_STEP_SUMMARY
 
-  # ------------------ Cleanup on Failure ------------------
   cleanup-on-failure:
     runs-on: ubuntu-latest
     needs: setup-infrastructure
@@ -292,26 +315,26 @@ jobs:
 
     - name: Cleanup AWS resources
       run: |
-        echo "Cleaning up resources due to failure..."
+        echo "Cleaning up resources..."
         INSTANCE_ID="${{ needs.setup-infrastructure.outputs.INSTANCE_ID }}"
         KEY_NAME="${{ needs.setup-infrastructure.outputs.KEY_NAME }}"
         SG_ID="${{ needs.setup-infrastructure.outputs.SECURITY_GROUP_ID }}"
         ALLOCATION_ID="${{ needs.setup-infrastructure.outputs.ALLOCATION_ID }}"
 
-        if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+        if [ -n "$INSTANCE_ID" ]; then
           aws ec2 terminate-instances --instance-ids "$INSTANCE_ID"
         fi
 
-        if [ -n "$KEY_NAME" ] && [ "$KEY_NAME" != "None" ]; then
+        if [ -n "$KEY_NAME" ]; then
           aws ec2 delete-key-pair --key-name "$KEY_NAME"
         fi
 
-        if [ -n "$ALLOCATION_ID" ] && [ "$ALLOCATION_ID" != "None" ]; then
+        if [ -n "$ALLOCATION_ID" ]; then
           aws ec2 release-address --allocation-id "$ALLOCATION_ID"
         fi
 
-        if [ -n "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
+        if [ -n "$SG_ID" ]; then
           aws ec2 delete-security-group --group-id "$SG_ID"
         fi
 
-        echo "Cleanup completed."
+        echo "Cleanup done."

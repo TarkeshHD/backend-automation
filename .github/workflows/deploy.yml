@@ -1,1 +1,293 @@
 
+name: AWS Infrastructure Setup
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: 'EC2 Instance Type'
+        required: true
+        default: 't3.micro'
+        type: choice
+        options:
+          - t3.micro
+          - t3.small
+          - t3.medium
+          - t3.large
+      key_pair_name:
+        description: 'EC2 Key Pair Name'
+        required: true
+        type: string
+      instance_name:
+        description: 'EC2 Instance Name Tag'
+        required: true
+        default: 'CodeDeploy-Instance'
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+  EC2_ROLE_NAME: EC2-CodeDeploy-Role
+  CODEDEPLOY_ROLE_NAME: CodeDeploy-Service-Role
+  SECURITY_GROUP_NAME: CodeDeploy-Security-Group
+
+jobs:
+  setup-infrastructure:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Create EC2 IAM Role
+      id: create-ec2-role
+      run: |
+        # Create trust policy for EC2
+        cat > ec2-trust-policy.json << EOF
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+        EOF
+
+        # Check if role exists
+        if aws iam get-role --role-name ${{ env.EC2_ROLE_NAME }} 2>/dev/null; then
+          echo "EC2 role already exists"
+        else
+          # Create EC2 role
+          aws iam create-role \
+            --role-name ${{ env.EC2_ROLE_NAME }} \
+            --assume-role-policy-document file://ec2-trust-policy.json \
+            --description "IAM role for EC2 instances to work with CodeDeploy"
+          
+          # Attach CodeDeploy policy to EC2 role
+          aws iam attach-role-policy \
+            --role-name ${{ env.EC2_ROLE_NAME }} \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+          
+          # Attach additional policies for EC2 CodeDeploy agent
+          aws iam attach-role-policy \
+            --role-name ${{ env.EC2_ROLE_NAME }} \
+            --policy-arn arn:aws:iam::aws:policy/AmazonEC2RoleforAWSCodeDeploy
+          
+          # Create instance profile
+          aws iam create-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }}
+          
+          # Add role to instance profile
+          aws iam add-role-to-instance-profile \
+            --instance-profile-name ${{ env.EC2_ROLE_NAME }} \
+            --role-name ${{ env.EC2_ROLE_NAME }}
+          
+          echo "EC2 role created successfully"
+        fi
+
+    - name: Create CodeDeploy IAM Role
+      id: create-codedeploy-role
+      run: |
+        # Create trust policy for CodeDeploy
+        cat > codedeploy-trust-policy.json << EOF
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "codedeploy.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+        EOF
+
+        # Check if role exists
+        if aws iam get-role --role-name ${{ env.CODEDEPLOY_ROLE_NAME }} 2>/dev/null; then
+          echo "CodeDeploy role already exists"
+        else
+          # Create CodeDeploy role
+          aws iam create-role \
+            --role-name ${{ env.CODEDEPLOY_ROLE_NAME }} \
+            --assume-role-policy-document file://codedeploy-trust-policy.json \
+            --description "IAM role for CodeDeploy service"
+          
+          # Attach CodeDeploy service policy
+          aws iam attach-role-policy \
+            --role-name ${{ env.CODEDEPLOY_ROLE_NAME }} \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+          
+          echo "CodeDeploy role created successfully"
+        fi
+
+    - name: Create Security Group
+      id: create-security-group
+      run: |
+        # Get default VPC ID
+        VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
+        
+        # Check if security group exists
+        EXISTING_SG=$(aws ec2 describe-security-groups \
+          --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" \
+          --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
+        
+        if [ "$EXISTING_SG" != "None" ] && [ "$EXISTING_SG" != "" ]; then
+          echo "Security group already exists: $EXISTING_SG"
+          echo "SECURITY_GROUP_ID=$EXISTING_SG" >> $GITHUB_OUTPUT
+        else
+          # Create security group
+          SECURITY_GROUP_ID=$(aws ec2 create-security-group \
+            --group-name ${{ env.SECURITY_GROUP_NAME }} \
+            --description "Security group for CodeDeploy instances" \
+            --vpc-id $VPC_ID \
+            --query 'GroupId' --output text)
+          
+          # Add inbound rules
+          aws ec2 authorize-security-group-ingress \
+            --group-id $SECURITY_GROUP_ID \
+            --protocol tcp \
+            --port 22 \
+            --cidr 0.0.0.0/0
+          
+          aws ec2 authorize-security-group-ingress \
+            --group-id $SECURITY_GROUP_ID \
+            --protocol tcp \
+            --port 80 \
+            --cidr 0.0.0.0/0
+          
+          aws ec2 authorize-security-group-ingress \
+            --group-id $SECURITY_GROUP_ID \
+            --protocol tcp \
+            --port 443 \
+            --cidr 0.0.0.0/0
+          
+          aws ec2 authorize-security-group-ingress \
+            --group-id $SECURITY_GROUP_ID \
+            --protocol tcp \
+            --port 27017 \
+            --cidr 0.0.0.0/0
+          
+          echo "Security group created: $SECURITY_GROUP_ID"
+          echo "SECURITY_GROUP_ID=$SECURITY_GROUP_ID" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Get Latest Ubuntu AMI
+      id: get-ami
+      run: |
+        # Get latest Ubuntu 22.04 LTS AMI
+        AMI_ID=$(aws ec2 describe-images \
+          --owners 099720109477 \
+          --filters \
+            "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
+            "Name=state,Values=available" \
+          --query 'Images|sort_by(@, &CreationDate)[-1].ImageId' \
+          --output text)
+        
+        echo "Latest Ubuntu AMI: $AMI_ID"
+        echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
+
+    - name: Launch EC2 Instance
+      id: launch-instance
+      run: |
+        # Wait for instance profile to be ready
+        sleep 30
+        
+        # Create user data script
+        cat > user-data.sh << 'EOF'
+        #!/bin/bash
+        apt-get update
+        apt-get install -y ruby wget
+        
+        # Install CodeDeploy agent
+        cd /home/ubuntu
+        wget https://aws-codedeploy-${{ env.AWS_REGION }}.s3.${{ env.AWS_REGION }}.amazonaws.com/latest/install
+        chmod +x ./install
+        ./install auto
+        
+        # Start CodeDeploy agent
+        service codedeploy-agent start
+        EOF
+        
+        # Launch EC2 instance
+        INSTANCE_ID=$(aws ec2 run-instances \
+          --image-id ${{ steps.get-ami.outputs.AMI_ID }} \
+          --count 1 \
+          --instance-type ${{ github.event.inputs.instance_type }} \
+          --key-name ${{ github.event.inputs.key_pair_name }} \
+          --security-group-ids ${{ steps.create-security-group.outputs.SECURITY_GROUP_ID }} \
+          --iam-instance-profile Name=${{ env.EC2_ROLE_NAME }} \
+          --user-data file://user-data.sh \
+          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}},{Key=Environment,Value=Development},{Key=Project,Value=CodeDeploy}]" \
+          --query 'Instances[0].InstanceId' \
+          --output text)
+        
+        echo "Instance launched: $INSTANCE_ID"
+        echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
+        
+        # Wait for instance to be running
+        echo "Waiting for instance to be running..."
+        aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+        
+        # Get instance public IP
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --instance-ids $INSTANCE_ID \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text)
+        
+        echo "Instance is running with Public IP: $PUBLIC_IP"
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
+
+    - name: Summary
+      run: |
+        echo "## 🚀 Infrastructure Setup Complete!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Created Resources:" >> $GITHUB_STEP_SUMMARY
+        echo "- **EC2 IAM Role**: ${{ env.EC2_ROLE_NAME }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **CodeDeploy IAM Role**: ${{ env.CODEDEPLOY_ROLE_NAME }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Security Group**: ${{ steps.create-security-group.outputs.SECURITY_GROUP_ID }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **EC2 Instance**: ${{ steps.launch-instance.outputs.INSTANCE_ID }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Public IP**: ${{ steps.launch-instance.outputs.PUBLIC_IP }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Security Group Ports:" >> $GITHUB_STEP_SUMMARY
+        echo "- SSH: 22" >> $GITHUB_STEP_SUMMARY
+        echo "- HTTP: 80" >> $GITHUB_STEP_SUMMARY
+        echo "- HTTPS: 443" >> $GITHUB_STEP_SUMMARY
+        echo "- MongoDB: 27017" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Next Steps:" >> $GITHUB_STEP_SUMMARY
+        echo "1. SSH to instance: \`ssh -i your-key.pem ubuntu@${{ steps.launch-instance.outputs.PUBLIC_IP }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "2. CodeDeploy agent is installed and running" >> $GITHUB_STEP_SUMMARY
+        echo "3. Instance is ready for CodeDeploy deployments" >> $GITHUB_STEP_SUMMARY
+
+  cleanup-on-failure:
+    runs-on: ubuntu-latest
+    needs: setup-infrastructure
+    if: failure()
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Cleanup resources on failure
+      run: |
+        echo "Cleaning up resources due to workflow failure..."
+        
+        # This is a basic cleanup - you may want to enhance this
+        # to clean up specific resources that were created
+        echo "Manual cleanup may be required for any partially created resources"

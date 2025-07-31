@@ -3,10 +3,14 @@ name: AWS Infrastructure Setup
 on:
   workflow_dispatch:
     inputs:
+      client_name:
+        description: 'Client Name (used for key pair)'
+        required: true
+        type: string
       instance_type:
         description: 'EC2 Instance Type'
         required: true
-        default: 't3.medium'
+        default: 't3.micro'
         type: choice
         options:
           - t3.micro
@@ -14,7 +18,7 @@ on:
           - t3.medium
           - t3.large
       instance_name:
-        description: 'EC2 Instance Name Tag / Client Name'
+        description: 'EC2 Instance Name Tag'
         required: true
         default: 'CodeDeploy-Instance'
         type: string
@@ -28,7 +32,7 @@ env:
 jobs:
   setup-infrastructure:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -40,33 +44,8 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # 🔑 Generate and Create EC2 Key Pair
-    - name: Generate and Create EC2 Key Pair
-      id: create-keypair
-      run: |
-        CLIENT_NAME="${{ github.event.inputs.instance_name }}"
-        KEY_NAME="${CLIENT_NAME}-key-$(date +%s)"
-        echo "Generated key name: $KEY_NAME"
-
-        # Create key pair and save private key
-        aws ec2 create-key-pair \
-          --key-name "$KEY_NAME" \
-          --query 'KeyMaterial' \
-          --output text > "${KEY_NAME}.pem"
-        
-        chmod 400 "${KEY_NAME}.pem"
-
-        echo "Key pair created and private key saved as ${KEY_NAME}.pem"
-        echo "KEY_NAME=$KEY_NAME" >> $GITHUB_OUTPUT
-
-    - name: Upload Private Key Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ec2-private-key
-        path: ${{ steps.create-keypair.outputs.KEY_NAME }}.pem
-
-    - name: Create EC2 IAM Role
-      id: create-ec2-role
+    # ------------------ IAM Role for EC2 ------------------
+    - name: Create EC2 IAM Role and Instance Profile
       run: |
         cat > ec2-trust-policy.json << EOF
         {
@@ -74,9 +53,7 @@ jobs:
           "Statement": [
             {
               "Effect": "Allow",
-              "Principal": {
-                "Service": "ec2.amazonaws.com"
-              },
+              "Principal": { "Service": "ec2.amazonaws.com" },
               "Action": "sts:AssumeRole"
             }
           ]
@@ -84,32 +61,41 @@ jobs:
         EOF
 
         if aws iam get-role --role-name ${{ env.EC2_ROLE_NAME }} 2>/dev/null; then
-          echo "EC2 role already exists"
+          echo "EC2 role exists"
         else
           aws iam create-role \
             --role-name ${{ env.EC2_ROLE_NAME }} \
             --assume-role-policy-document file://ec2-trust-policy.json \
             --description "IAM role for EC2 instances to work with CodeDeploy"
-          
+
           aws iam attach-role-policy \
             --role-name ${{ env.EC2_ROLE_NAME }} \
             --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-          
+
           aws iam attach-role-policy \
             --role-name ${{ env.EC2_ROLE_NAME }} \
-            --policy-arn arn:aws:iam::aws:policy/AmazonEC2RoleforAWSCodeDeployLimited
-          
-          aws iam create-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }}
+            --policy-arn arn:aws:iam::aws:policy/AmazonEC2RoleforAWSCodeDeploy
+
+          aws iam create-instance-profile \
+            --instance-profile-name ${{ env.EC2_ROLE_NAME }}
           
           aws iam add-role-to-instance-profile \
             --instance-profile-name ${{ env.EC2_ROLE_NAME }} \
             --role-name ${{ env.EC2_ROLE_NAME }}
-          
-          echo "EC2 role created successfully"
         fi
 
+        echo "Waiting for instance profile propagation..."
+        for i in {1..10}; do
+          if aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
+            echo "Instance profile ready"
+            break
+          fi
+          echo "Retrying in 10s..."
+          sleep 10
+        done
+
+    # ------------------ IAM Role for CodeDeploy ------------------
     - name: Create CodeDeploy IAM Role
-      id: create-codedeploy-role
       run: |
         cat > codedeploy-trust-policy.json << EOF
         {
@@ -117,9 +103,7 @@ jobs:
           "Statement": [
             {
               "Effect": "Allow",
-              "Principal": {
-                "Service": "codedeploy.amazonaws.com"
-              },
+              "Principal": { "Service": "codedeploy.amazonaws.com" },
               "Action": "sts:AssumeRole"
             }
           ]
@@ -127,149 +111,128 @@ jobs:
         EOF
 
         if aws iam get-role --role-name ${{ env.CODEDEPLOY_ROLE_NAME }} 2>/dev/null; then
-          echo "CodeDeploy role already exists"
+          echo "CodeDeploy role exists"
         else
           aws iam create-role \
             --role-name ${{ env.CODEDEPLOY_ROLE_NAME }} \
             --assume-role-policy-document file://codedeploy-trust-policy.json \
-            --description "IAM role for CodeDeploy service"
-          
+            --description "IAM role for CodeDeploy"
+
           aws iam attach-role-policy \
             --role-name ${{ env.CODEDEPLOY_ROLE_NAME }} \
             --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-          
-          echo "CodeDeploy role created successfully"
         fi
 
+    # ------------------ Security Group ------------------
     - name: Create Security Group
-      id: create-security-group
+      id: create-sg
       run: |
         VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
-        
+
         EXISTING_SG=$(aws ec2 describe-security-groups \
           --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" \
           --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
-        
+
         if [ "$EXISTING_SG" != "None" ] && [ "$EXISTING_SG" != "" ]; then
-          echo "Security group already exists: $EXISTING_SG"
+          echo "Security group exists: $EXISTING_SG"
           echo "SECURITY_GROUP_ID=$EXISTING_SG" >> $GITHUB_OUTPUT
         else
-          SECURITY_GROUP_ID=$(aws ec2 create-security-group \
+          SG_ID=$(aws ec2 create-security-group \
             --group-name ${{ env.SECURITY_GROUP_NAME }} \
-            --description "Security group for CodeDeploy instances" \
+            --description "SG for CodeDeploy" \
             --vpc-id $VPC_ID \
             --query 'GroupId' --output text)
-          
-          aws ec2 authorize-security-group-ingress \
-            --group-id $SECURITY_GROUP_ID \
-            --protocol tcp --port 22 --cidr 0.0.0.0/0
-          aws ec2 authorize-security-group-ingress \
-            --group-id $SECURITY_GROUP_ID \
-            --protocol tcp --port 80 --cidr 0.0.0.0/0
-          aws ec2 authorize-security-group-ingress \
-            --group-id $SECURITY_GROUP_ID \
-            --protocol tcp --port 443 --cidr 0.0.0.0/0
-          aws ec2 authorize-security-group-ingress \
-            --group-id $SECURITY_GROUP_ID \
-            --protocol tcp --port 27017 --cidr 0.0.0.0/0
-          
-          echo "Security group created: $SECURITY_GROUP_ID"
-          echo "SECURITY_GROUP_ID=$SECURITY_GROUP_ID" >> $GITHUB_OUTPUT
+
+          for PORT in 22 80 443 27017; do
+            aws ec2 authorize-security-group-ingress \
+              --group-id $SG_ID \
+              --protocol tcp \
+              --port $PORT \
+              --cidr 0.0.0.0/0
+          done
+
+          echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
         fi
 
+    # ------------------ Create Key Pair ------------------
+    - name: Create EC2 Key Pair
+      id: create-key
+      run: |
+        KEY_NAME="${{ github.event.inputs.client_name }}-key-$(date +%s)"
+        echo "Generated Key Name: $KEY_NAME"
+
+        aws ec2 create-key-pair \
+          --key-name "$KEY_NAME" \
+          --query 'KeyMaterial' \
+          --output text > "${KEY_NAME}.pem"
+
+        chmod 400 "${KEY_NAME}.pem"
+        echo "KEY_NAME=$KEY_NAME" >> $GITHUB_OUTPUT
+
+    - name: Upload Key Pair Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ec2-private-key
+        path: ${{ steps.create-key.outputs.KEY_NAME }}.pem
+
+    # ------------------ Get AMI ------------------
     - name: Get Latest Ubuntu AMI
       id: get-ami
       run: |
         AMI_ID=$(aws ec2 describe-images \
           --owners 099720109477 \
-          --filters \
-            "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
-            "Name=state,Values=available" \
+          --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
           --query 'Images|sort_by(@, &CreationDate)[-1].ImageId' \
           --output text)
-        
-        echo "Latest Ubuntu AMI: $AMI_ID"
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
+    # ------------------ Launch EC2 ------------------
     - name: Launch EC2 Instance
       id: launch-instance
       run: |
-        sleep 30
-        
         cat > user-data.sh << 'EOF'
         #!/bin/bash
         apt-get update
         apt-get install -y ruby wget
-        
         cd /home/ubuntu
         wget https://aws-codedeploy-${{ env.AWS_REGION }}.s3.${{ env.AWS_REGION }}.amazonaws.com/latest/install
         chmod +x ./install
         ./install auto
         service codedeploy-agent start
         EOF
-        
+
         INSTANCE_ID=$(aws ec2 run-instances \
           --image-id ${{ steps.get-ami.outputs.AMI_ID }} \
           --count 1 \
           --instance-type ${{ github.event.inputs.instance_type }} \
-          --key-name ${{ steps.create-keypair.outputs.KEY_NAME }} \
-          --security-group-ids ${{ steps.create-security-group.outputs.SECURITY_GROUP_ID }} \
+          --key-name ${{ steps.create-key.outputs.KEY_NAME }} \
+          --security-group-ids ${{ steps.create-sg.outputs.SECURITY_GROUP_ID }} \
           --iam-instance-profile Name=${{ env.EC2_ROLE_NAME }} \
           --user-data file://user-data.sh \
           --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}},{Key=Environment,Value=Development},{Key=Project,Value=CodeDeploy}]" \
           --query 'Instances[0].InstanceId' \
           --output text)
-        
+
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
-        
-        echo "Waiting for instance to be running..."
+        echo "Waiting for instance to run..."
         aws ec2 wait instance-running --instance-ids $INSTANCE_ID
-        
+
         PUBLIC_IP=$(aws ec2 describe-instances \
           --instance-ids $INSTANCE_ID \
           --query 'Reservations[0].Instances[0].PublicIpAddress' \
           --output text)
-        
         echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
 
+    # ------------------ Summary ------------------
     - name: Summary
       run: |
         echo "## 🚀 Infrastructure Setup Complete!" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Created Resources:" >> $GITHUB_STEP_SUMMARY
         echo "- **EC2 IAM Role**: ${{ env.EC2_ROLE_NAME }}" >> $GITHUB_STEP_SUMMARY
         echo "- **CodeDeploy IAM Role**: ${{ env.CODEDEPLOY_ROLE_NAME }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Security Group**: ${{ steps.create-security-group.outputs.SECURITY_GROUP_ID }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Security Group**: ${{ steps.create-sg.outputs.SECURITY_GROUP_ID }}" >> $GITHUB_STEP_SUMMARY
         echo "- **EC2 Instance**: ${{ steps.launch-instance.outputs.INSTANCE_ID }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Public IP**: ${{ steps.launch-instance.outputs.PUBLIC_IP }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Key Pair**: ${{ steps.create-keypair.outputs.KEY_NAME }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Key Pair**: ${{ steps.create-key.outputs.KEY_NAME }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Security Group Ports:" >> $GITHUB_STEP_SUMMARY
-        echo "- SSH: 22" >> $GITHUB_STEP_SUMMARY
-        echo "- HTTP: 80" >> $GITHUB_STEP_SUMMARY
-        echo "- HTTPS: 443" >> $GITHUB_STEP_SUMMARY
-        echo "- MongoDB: 27017" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Next Steps:" >> $GITHUB_STEP_SUMMARY
-        echo "1. Download the private key artifact from this workflow" >> $GITHUB_STEP_SUMMARY
-        echo "2. SSH: \`ssh -i your-downloaded-key.pem ubuntu@${{ steps.launch-instance.outputs.PUBLIC_IP }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "3. CodeDeploy agent is installed and running" >> $GITHUB_STEP_SUMMARY
-        echo "4. Instance is ready for CodeDeploy deployments" >> $GITHUB_STEP_SUMMARY
-
-  cleanup-on-failure:
-    runs-on: ubuntu-latest
-    needs: setup-infrastructure
-    if: failure()
-    
-    steps:
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-    
-    - name: Cleanup resources on failure
-      run: |
-        echo "Cleaning up resources due to workflow failure..."
-        echo "Manual cleanup may be required for any partially created resources"
+        echo "### SSH Command:" >> $GITHUB_STEP_SUMMARY
+        echo "\`ssh -i ec2-private-key.pem ubuntu@${{ steps.launch-instance.outputs.PUBLIC_IP }}\`" >> $GITHUB_STEP_SUMMARY

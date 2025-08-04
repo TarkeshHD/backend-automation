@@ -1,81 +1,85 @@
-name: Deploy Backend to AWS EKS
+name: Backend Deploy
 
 on:
   push:
     branches:
       - main
 
-env:
-  AWS_REGION: us-east-1
-  IMAGE_NAME: backend
-  DEPLOYMENT_FILE: backend-deployment.yaml
-  SERVICE_FILE: backend-service.yaml
-
 jobs:
-  deploy:
+  deploy-backend:
     runs-on: ubuntu-latest
+    env:
+      CLUSTER_NAME: Backend-deploy-1234
+      AWS_REGION: us-east-1
+      IMAGE_NAME: backend
+      DEPLOYMENT_FILE: backend-deployment.yaml
+      SERVICE_FILE: backend-service.yaml
 
     steps:
-      # ✅ Checkout code
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v3
 
-      # ✅ Configure AWS credentials
-      - name: Configure AWS credentials
+      - name: Install eksctl & kubectl
+        run: |
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          curl -o kubectl https://amazon-eks.s3.us-east-1.amazonaws.com/$(aws eks describe-cluster-versions --query "validVersions[-1]" --output text)/2022-11-14/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ✅ Install kubectl & eksctl
-      - name: Install tools
+      - name: Create EKS Cluster if not exists
         run: |
-          sudo curl --silent --location \
-            "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" \
-            | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
+          echo "Checking if cluster $CLUSTER_NAME exists..."
+          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "✅ Cluster $CLUSTER_NAME already exists."
+          else
+            echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
+            eksctl create cluster \
+              --name "$CLUSTER_NAME" \
+              --region "$AWS_REGION" \
+              --nodegroup-name standard-workers \
+              --node-type t3.medium \
+              --nodes 2 \
+              --nodes-min 1 \
+              --nodes-max 3 \
+              --managed
+          fi
 
-          curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
-
-      # ✅ Authenticate Docker to ECR
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # ✅ Ensure ECR repository exists
-      - name: Create ECR repository if not exists
-        run: |
-          aws ecr describe-repositories --repository-names $IMAGE_NAME || \
-          aws ecr create-repository --repository-name $IMAGE_NAME
-          echo "✅ ECR repository ready."
-
-      # ✅ Build and Push Docker image
-      - name: Build and Push Docker Image
-        run: |
-          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${IMAGE_NAME}:${GITHUB_SHA::7}"
-          echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
-          docker build -f ./vrse-builder-backend-main/Dockerfile \
-            -t $ECR_IMAGE ./vrse-builder-backend-main
-          docker push $ECR_IMAGE
-
-      # ✅ Update kubeconfig for existing cluster
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig \
-            --name Backend-deploy-1234 \
+            --name $CLUSTER_NAME \
             --region $AWS_REGION
 
-      # ✅ Deploy backend to EKS
+      - name: Build & Push Docker Image
+        run: |
+          aws ecr describe-repositories --repository-names $IMAGE_NAME || \
+          aws ecr create-repository --repository-name $IMAGE_NAME
+
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_IMAGE="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:${GITHUB_SHA::7}"
+
+          echo "Logging into ECR..."
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+          echo "Building and pushing image: $ECR_IMAGE"
+          docker build -t $ECR_IMAGE -f ./vrse-builder-backend-main/Dockerfile ./vrse-builder-backend-main
+          docker push $ECR_IMAGE
+          echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
+
       - name: Deploy to EKS
         run: |
           sed -i "s|image: .*|image: $ECR_IMAGE|" $DEPLOYMENT_FILE
           kubectl apply -f $DEPLOYMENT_FILE
           kubectl apply -f $SERVICE_FILE
 
-      # ✅ Verify deployment
-      - name: Verify Rollout
+      - name: Verify Deployment
         run: |
           kubectl rollout status deployment/backend-deployment

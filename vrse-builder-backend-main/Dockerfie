@@ -1,0 +1,26 @@
+# Use official Node.js LTS image
+FROM node:20-alpine AS base
+
+# Set working directory
+WORKDIR /usr/src/app
+
+# Copy package files first (for caching)
+COPY package*.json ./
+
+# Install only production dependencies
+RUN npm install --only=production
+
+# Copy the rest of the app
+COPY . .
+
+# Expose the application port
+EXPOSE 5000
+
+# Set environment variables
+ENV NODE_ENV=production \
+    MONGODB_HOST=mongo-service \
+    MONGODB_PORT=27017 \
+    MONGODB_DB_NAME=vrseBuilder
+
+# Start the Node.js server
+CMD ["node", "server.js"]

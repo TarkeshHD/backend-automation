@@ -3,7 +3,7 @@ name: Deploy Backend to Kubernetes
 on:
   push:
     branches:
-      - main   # Trigger deployment on main branch push
+      - main
 
 env:
   IMAGE_NAME: tarkeshhd/backend

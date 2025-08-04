@@ -1,88 +1,77 @@
-name: Deploy Backend to AWS EKS
+name: Backend Docker Deploy
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 env:
-  IMAGE_NAME: tarkeshhd/backend
-  AWS_REGION: us-east-1
-  EKS_CLUSTER_NAME: tarkesh-backend-deploy
-  K8S_NAMESPACE: default
+  IMAGE_NAME: backend
+  DOCKERFILE_PATH: ./vrse-builder-backend-main/Dockerfile
+  CONTEXT_PATH: ./vrse-builder-backend-main
 
 jobs:
-  build-and-deploy:
+  docker-build-and-push:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      # ----------------- Create Repo If Not Exists -----------------
+      - name: Create Docker Hub Repo If Missing
+        run: |
+          echo "🔍 Checking if Docker Hub repo exists..."
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -u "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_PASSWORD }}" \
+            https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME/)
 
-    # ✅ Use Docker Hub password instead of token
-    - name: Log in to DockerHub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+          if [ "$RESPONSE" -eq 404 ]; then
+            echo "🚀 Repository doesn't exist. Creating..."
+            curl -s -X POST https://hub.docker.com/v2/repositories/ \
+              -u "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_PASSWORD }}" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "name": "'$IMAGE_NAME'",
+                "namespace": "'${{ secrets.DOCKERHUB_USERNAME }}'",
+                "description": "Backend service",
+                "is_private": false
+              }'
+            echo "✅ Repo created successfully!"
+          else
+            echo "✅ Repo already exists."
+          fi
 
-    # ✅ Verify Docker login
-    - name: Verify Docker Login
-      run: docker info
+      # ----------------- Docker Hub Login -----------------
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-    - name: Detect Dockerfile Location
-      run: |
-        if [ -f "./vrse-builder-backend-main/Dockerfile" ]; then
-          echo "DOCKERFILE_PATH=./vrse-builder-backend-main/Dockerfile" >> $GITHUB_ENV
-          echo "CONTEXT_PATH=./vrse-builder-backend-main" >> $GITHUB_ENV
-          echo "✅ Detected Dockerfile in vrse-builder-backend-main"
-        elif [ -f "./Dockerfile" ]; then
-          echo "DOCKERFILE_PATH=./Dockerfile" >> $GITHUB_ENV
-          echo "CONTEXT_PATH=." >> $GITHUB_ENV
-          echo "✅ Detected root Dockerfile"
-        else
-          echo "❌ No Dockerfile found!"
-          exit 1
-        fi
+      - name: Verify Docker Login
+        run: docker info | grep Username
 
-    - name: Build and Push Docker Image
-      run: |
-        echo "Using Dockerfile: $DOCKERFILE_PATH"
-        echo "Using Build Context: $CONTEXT_PATH"
-        docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${{ github.sha }} $CONTEXT_PATH
-        docker push $IMAGE_NAME:${{ github.sha }}
+      # ----------------- Detect Dockerfile -----------------
+      - name: Detect Dockerfile Path
+        run: |
+          if [ -f "$DOCKERFILE_PATH" ]; then
+            echo "✅ Detected Dockerfile at $DOCKERFILE_PATH"
+          else
+            echo "❌ Dockerfile not found at $DOCKERFILE_PATH"
+            exit 1
+          fi
 
-    - name: Configure AWS CLI
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      # ----------------- Build and Push -----------------
+      - name: Build and Push Docker Image
+        run: |
+          echo "🔨 Building Docker image..."
+          docker build -f $DOCKERFILE_PATH -t ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:${{ github.sha }} $CONTEXT_PATH
+          
+          echo "📤 Pushing image to Docker Hub..."
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:${{ github.sha }}
 
-    - name: Update kubeconfig for EKS
-      run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
-
-    - name: Set up Kubectl
-      uses: azure/setup-kubectl@v3
-      with:
-        version: 'latest'
-
-    - name: Update Kubernetes Deployment Image
-      run: |
-        sed -i "s|tarkeshhd/backend:latest|$IMAGE_NAME:${{ github.sha }}|" backend-deployment.yaml
-
-    - name: Deploy to EKS
-      run: |
-        kubectl apply -f backend-deployment.yaml -n $K8S_NAMESPACE
-        kubectl apply -f backend-service.yaml -n $K8S_NAMESPACE
-
-    - name: Verify Deployment
-      run: |
-        kubectl rollout status deployment/backend-deployment -n $K8S_NAMESPACE || (
-          echo "❌ Deployment failed. Rolling back..."
-          kubectl rollout undo deployment/backend-deployment -n $K8S_NAMESPACE
-          exit 1
-        )
+      # ----------------- Summary -----------------
+      - name: Deployment Summary
+        run: |
+          echo "## ✅ Docker Image Deployed Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository**: https://hub.docker.com/r/${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME" >> $GITHUB_STEP_SUMMARY

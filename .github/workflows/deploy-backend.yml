@@ -1,4 +1,4 @@
-name: Backend Docker Build and EKS Deploy
+name: Backend EKS Deployment
 
 on:
   workflow_dispatch:
@@ -9,42 +9,18 @@ on:
         type: string
 
 env:
-  IMAGE_NAME: backend
+  IMAGE_NAME: tarkeshhd/backend
   DOCKERFILE_PATH: ./vrse-builder-backend-main/Dockerfile
   CONTEXT_PATH: ./vrse-builder-backend-main
 
 jobs:
-  backend-deploy:
+  setup-iam-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
+      # ✅ Checkout Code
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      # ✅ Docker Hub login
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-      # ✅ Build and Push Docker image
-      - name: Build and Push Backend Image
-        run: |
-          TAG="${GITHUB_SHA::7}"
-          echo "Building image: ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:$TAG"
-
-          docker build -f $DOCKERFILE_PATH -t ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:$TAG $CONTEXT_PATH
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:$TAG
-
-      # ✅ Install kubectl and eksctl
-      - name: Install tools
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
 
       # ✅ Configure AWS credentials
       - name: Configure AWS credentials
@@ -54,8 +30,32 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ Check or create EKS cluster
-      - name: Check or create EKS cluster
+      # ✅ Attach IAM Policies (Automated)
+      - name: Attach Required IAM Policies
+        run: |
+          USER_NAME="github-actions-user-backend"
+
+          for POLICY in AmazonEKSFullAccess AmazonEC2FullAccess IAMFullAccess CloudFormationFullAccess; do
+            if ! aws iam list-attached-user-policies --user-name "$USER_NAME" | grep -q "$POLICY"; then
+              aws iam attach-user-policy \
+                --user-name "$USER_NAME" \
+                --policy-arn arn:aws:iam::aws:policy/$POLICY
+              echo "✅ Attached $POLICY to $USER_NAME"
+            else
+              echo "🔹 $POLICY already attached."
+            fi
+          done
+
+      # ✅ Install eksctl and kubectl
+      - name: Install eksctl and kubectl
+        run: |
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+      # ✅ Check or Create EKS Cluster
+      - name: Check or Create EKS Cluster
         run: |
           CLUSTER_NAME="${{ github.event.inputs.eks_cluster_name }}"
           REGION="${{ secrets.AWS_REGION }}"
@@ -76,25 +76,30 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig for EKS
+      # ✅ Generate kubeconfig
       - name: Generate kubeconfig
         run: |
           aws eks update-kubeconfig \
             --name ${{ github.event.inputs.eks_cluster_name }} \
             --region ${{ secrets.AWS_REGION }}
 
-      # ✅ Deploy to EKS
+      # ✅ Build and Push Docker Image
+      - name: Build and Push Docker Image
+        run: |
+          echo "Using Dockerfile: $DOCKERFILE_PATH"
+          echo "Using Build Context: $CONTEXT_PATH"
+          docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+          docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${GITHUB_SHA} $CONTEXT_PATH
+          docker push $IMAGE_NAME:${GITHUB_SHA}
+
+      # ✅ Deploy Backend to EKS
       - name: Deploy Backend
         run: |
-          IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/backend"
-          TAG="${GITHUB_SHA::7}"
-          echo "Deploying image: $IMAGE_NAME:$TAG"
-
-          sed -i "s|image: .*|image: $IMAGE_NAME:$TAG|" backend-deployment.yaml
+          sed -i "s|image: .*|image: $IMAGE_NAME:${GITHUB_SHA}|" backend-deployment.yaml
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
-      # ✅ Verify rollout
-      - name: Verify Deployment
+      # ✅ Verify Deployment
+      - name: Verify Rollout
         run: |
           kubectl rollout status deployment/backend-deployment

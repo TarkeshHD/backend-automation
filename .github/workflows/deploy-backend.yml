@@ -8,7 +8,7 @@ on:
 env:
   IMAGE_NAME: tarkeshhd/backend
   AWS_REGION: us-east-1
-  EKS_CLUSTER_NAME: tarkesh-backend-deploy   # <-- Replace with your EKS cluster name
+  EKS_CLUSTER_NAME: tarkesh-backend-deploy  # <-- Your actual EKS cluster name
   K8S_NAMESPACE: default
 
 jobs:
@@ -28,12 +28,13 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+    # ✅ Detect Dockerfile location
     - name: Detect Dockerfile Location
       run: |
-        if [ -f "./backend/Dockerfile" ]; then
-          echo "DOCKERFILE_PATH=./backend/Dockerfile" >> $GITHUB_ENV
-          echo "CONTEXT_PATH=./backend" >> $GITHUB_ENV
-          echo "✅ Detected backend folder with Dockerfile"
+        if [ -f "./vrse-builder-backend-main/Dockerfile" ]; then
+          echo "DOCKERFILE_PATH=./vrse-builder-backend-main/Dockerfile" >> $GITHUB_ENV
+          echo "CONTEXT_PATH=./vrse-builder-backend-main" >> $GITHUB_ENV
+          echo "✅ Detected Dockerfile in vrse-builder-backend-main"
         elif [ -f "./Dockerfile" ]; then
           echo "DOCKERFILE_PATH=./Dockerfile" >> $GITHUB_ENV
           echo "CONTEXT_PATH=." >> $GITHUB_ENV
@@ -50,6 +51,7 @@ jobs:
         docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${{ github.sha }} $CONTEXT_PATH
         docker push $IMAGE_NAME:${{ github.sha }}
 
+    # ✅ Configure AWS for EKS
     - name: Configure AWS CLI
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -65,6 +67,7 @@ jobs:
       with:
         version: 'latest'
 
+    # ✅ Update Kubernetes deployment image dynamically
     - name: Update Kubernetes Deployment Image
       run: |
         sed -i "s|tarkeshhd/backend:latest|$IMAGE_NAME:${{ github.sha }}|" backend-deployment.yaml

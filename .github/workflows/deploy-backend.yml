@@ -1,4 +1,4 @@
-name: Backend Deployment
+name: Backend Deployment to EKS
 
 on:
   workflow_dispatch:
@@ -17,106 +17,93 @@ env:
   SERVICE_FILE: backend-service.yaml
 
 jobs:
-  deploy-backend:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      # ✅ Checkout repository
+      - name: Checkout
         uses: actions/checkout@v3
 
-      # ✅ Check and install AWS CLI only if not installed
-      - name: Ensure AWS CLI is installed
+      # ✅ Install AWS CLI
+      - name: Install AWS CLI
         run: |
-          if ! command -v aws &> /dev/null; then
-            echo "Installing AWS CLI..."
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip awscliv2.zip
-            sudo ./aws/install
-          else
-            echo "✅ AWS CLI already installed: $(aws --version)"
-          fi
-
-      # ✅ Attach ECR policy
-      - name: Attach ECR Policy
-        run: |
-          USER_NAME="github-actions-user-backend"
-          POLICY="AmazonEC2ContainerRegistryFullAccess"
-
-          echo "Checking ECR policy for $USER_NAME..."
-          if ! aws iam list-attached-user-policies --user-name "$USER_NAME" | grep -q "$POLICY"; then
-            aws iam attach-user-policy \
-              --user-name "$USER_NAME" \
-              --policy-arn arn:aws:iam::aws:policy/$POLICY
-            echo "✅ Attached $POLICY to $USER_NAME"
-          else
-            echo "🔹 $POLICY already attached."
-          fi
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+          sudo apt-get update
+          sudo apt-get install -y unzip curl
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install --update
 
       # ✅ Configure AWS credentials
-      - name: Configure AWS Credentials
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ✅ Create/Get ECR repository
-      - name: Create/Get ECR Repository
+      # ✅ Attach IAM policies for EKS access
+      - name: Attach EKS IAM Policies
         run: |
-          aws ecr describe-repositories --repository-names $IMAGE_NAME || \
-          aws ecr create-repository --repository-name $IMAGE_NAME
-          echo "✅ ECR repository ready."
+          USER_NAME="github-actions-user-backend"
+          POLICIES=(
+            "AmazonEKSClusterPolicy"
+            "AmazonEKSWorkerNodePolicy"
+            "AmazonEKS_CNI_Policy"
+            "AmazonEC2ContainerRegistryFullAccess"
+            "IAMFullAccess"
+            "AmazonEC2FullAccess"
+          )
 
-      # ✅ Docker login to ECR
+          for POLICY in "${POLICIES[@]}"; do
+            if ! aws iam list-attached-user-policies --user-name "$USER_NAME" | grep -q "$POLICY"; then
+              aws iam attach-user-policy \
+                --user-name "$USER_NAME" \
+                --policy-arn arn:aws:iam::aws:policy/$POLICY
+              echo "✅ Attached $POLICY"
+            else
+              echo "🔹 $POLICY already attached."
+            fi
+          done
+
+      # ✅ Ensure ECR repository exists
+      - name: Create ECR repository if not exists
+        run: |
+          if ! aws ecr describe-repositories --repository-names $IMAGE_NAME >/dev/null 2>&1; then
+            aws ecr create-repository --repository-name $IMAGE_NAME
+            echo "✅ Created ECR repository $IMAGE_NAME"
+          else
+            echo "🔹 ECR repository $IMAGE_NAME already exists."
+          fi
+
+      # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR
-        run: |
-          aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-        env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Build and Push Docker Image
+      # ✅ Build and push Docker image
       - name: Build and Push Docker Image
         run: |
-          ECR_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME}:${GITHUB_SHA::7}"
+          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${IMAGE_NAME}:${GITHUB_SHA::7}"
           echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
-
           docker build -f $DOCKERFILE_PATH -t $ECR_IMAGE $CONTEXT_PATH
           docker push $ECR_IMAGE
-        env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-
-      # ✅ Install kubectl and eksctl
-      - name: Install tools
-        run: |
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
       # ✅ Update kubeconfig
-      - name: Update kubeconfig
+      - name: Update kubeconfig for EKS
         run: |
           aws eks update-kubeconfig \
             --name "${{ github.event.inputs.eks_cluster_name }}" \
             --region $AWS_REGION
 
-      # ✅ Update image in Deployment YAML
-      - name: Update Kubernetes Deployment
+      # ✅ Deploy backend
+      - name: Deploy Backend to EKS
         run: |
-          sed -i "s|image: .*|image: ${ECR_IMAGE}|" $DEPLOYMENT_FILE
-
-      # ✅ Deploy to Kubernetes
-      - name: Apply Kubernetes Files
-        run: |
+          sed -i "s|image: .*|image: $ECR_IMAGE|" $DEPLOYMENT_FILE
           kubectl apply -f $DEPLOYMENT_FILE
           kubectl apply -f $SERVICE_FILE
 
-      # ✅ Verify deployment
-      - name: Verify Rollout
+      # ✅ Verify rollout
+      - name: Verify Deployment Rollout
         run: |
           kubectl rollout status deployment/backend-deployment

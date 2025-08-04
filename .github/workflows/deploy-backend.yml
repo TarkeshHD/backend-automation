@@ -21,19 +21,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repository
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # ✅ Install AWS CLI v2 manually
-      - name: Install AWS CLI
+      # ✅ Check and install AWS CLI only if not installed
+      - name: Ensure AWS CLI is installed
         run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install
-          aws --version
+          if ! command -v aws &> /dev/null; then
+            echo "Installing AWS CLI..."
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+          else
+            echo "✅ AWS CLI already installed: $(aws --version)"
+          fi
 
-      # ✅ Attach ECR Full Access Policy
+      # ✅ Attach ECR policy
       - name: Attach ECR Policy
         run: |
           USER_NAME="github-actions-user-backend"
@@ -68,7 +71,7 @@ jobs:
           aws ecr create-repository --repository-name $IMAGE_NAME
           echo "✅ ECR repository ready."
 
-      # ✅ Authenticate Docker with ECR
+      # ✅ Docker login to ECR
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region $AWS_REGION | \
@@ -76,7 +79,7 @@ jobs:
         env:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
 
-      # ✅ Build and push Docker image
+      # ✅ Build and Push Docker Image
       - name: Build and Push Docker Image
         run: |
           ECR_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME}:${GITHUB_SHA::7}"

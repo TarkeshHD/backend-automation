@@ -21,11 +21,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    # ✅ Checkout repository
     - name: Checkout Code
       uses: actions/checkout@v3
 
-    # ✅ Install kubectl and eksctl
     - name: Install tools
       run: |
         curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
@@ -33,7 +31,6 @@ jobs:
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
-    # ✅ Configure AWS credentials
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v2
       with:
@@ -41,7 +38,6 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # ✅ Attach required IAM policies
     - name: Attach Required IAM Policies
       run: |
         USER_NAME="github-actions-user-backend"
@@ -51,7 +47,7 @@ jobs:
           "AmazonEKSServicePolicy"
           "AmazonEC2FullAccess"
           "IAMFullAccess"
-          "CloudFormationFullAccess"
+          "AWSCloudFormationFullAccess"
         )
 
         for POLICY in "${POLICIES[@]}"; do
@@ -66,14 +62,12 @@ jobs:
           fi
         done
 
-    # ✅ Login to DockerHub
     - name: Docker Login
       uses: docker/login-action@v2
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    # ✅ Build and Push Docker image
     - name: Build and Push Docker Image
       run: |
         echo "Using Dockerfile: $DOCKERFILE_PATH"
@@ -81,7 +75,6 @@ jobs:
         docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${GITHUB_SHA} $CONTEXT_PATH
         docker push $IMAGE_NAME:${GITHUB_SHA}
 
-    # ✅ Check or create EKS cluster
     - name: Check or create EKS cluster
       run: |
         CLUSTER_NAME="${{ github.event.inputs.eks_cluster_name }}"
@@ -103,21 +96,18 @@ jobs:
             --managed
         fi
 
-    # ✅ Generate kubeconfig
     - name: Generate kubeconfig
       run: |
         aws eks update-kubeconfig \
           --name ${{ github.event.inputs.eks_cluster_name }} \
           --region ${{ env.AWS_REGION }}
 
-    # ✅ Deploy backend to EKS
     - name: Deploy Backend
       run: |
         sed -i "s|image: .*|image: $IMAGE_NAME:${GITHUB_SHA}|" $DEPLOYMENT_FILE
         kubectl apply -f $DEPLOYMENT_FILE
         kubectl apply -f $SERVICE_FILE
 
-    # ✅ Verify rollout
     - name: Verify Deployment
       run: |
         kubectl rollout status deployment/backend-deployment

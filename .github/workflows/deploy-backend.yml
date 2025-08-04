@@ -28,17 +28,17 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Detect Dockerfile Path
-      id: detect-path
+    # ✅ Auto-detect Dockerfile
+    - name: Detect Dockerfile Location
       run: |
         if [ -f "./backend/Dockerfile" ]; then
           echo "DOCKERFILE_PATH=./backend/Dockerfile" >> $GITHUB_ENV
           echo "CONTEXT_PATH=./backend" >> $GITHUB_ENV
-          echo "Detected backend folder with Dockerfile"
+          echo "✅ Detected backend folder with Dockerfile"
         elif [ -f "./Dockerfile" ]; then
           echo "DOCKERFILE_PATH=./Dockerfile" >> $GITHUB_ENV
           echo "CONTEXT_PATH=." >> $GITHUB_ENV
-          echo "Detected root Dockerfile"
+          echo "✅ Detected root Dockerfile"
         else
           echo "❌ No Dockerfile found!"
           exit 1
@@ -51,6 +51,7 @@ jobs:
         docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${{ github.sha }} $CONTEXT_PATH
         docker push $IMAGE_NAME:${{ github.sha }}
 
+    # ✅ Configure AWS for EKS
     - name: Configure AWS CLI
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -77,4 +78,8 @@ jobs:
 
     - name: Verify Deployment
       run: |
-        kubectl rollout status deployment/backend-deployment -n $K8S_NAMESPACE
+        kubectl rollout status deployment/backend-deployment -n $K8S_NAMESPACE || (
+          echo "❌ Deployment failed. Rolling back..."
+          kubectl rollout undo deployment/backend-deployment -n $K8S_NAMESPACE
+          exit 1
+        )

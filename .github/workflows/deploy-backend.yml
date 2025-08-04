@@ -97,9 +97,9 @@ jobs:
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend: $BACKEND_IMAGE:$TAG"
 
-          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" k8s/backend-deployment.yaml
-          kubectl apply -f k8s/backend-deployment.yaml
-          kubectl apply -f k8s/backend-service.yaml
+          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
+          kubectl apply -f backend-deployment.yaml
+          kubectl apply -f backend-service.yaml
 
       # ✅ Verify rollout
       - name: Verify Deployment

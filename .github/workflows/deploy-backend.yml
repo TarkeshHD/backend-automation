@@ -3,15 +3,13 @@ name: Deploy Backend to AWS EKS
 on:
   push:
     branches:
-      - main   # Deploy only when main branch is updated
+      - main
 
 env:
   IMAGE_NAME: tarkeshhd/backend
   AWS_REGION: us-east-1
   EKS_CLUSTER_NAME: your-cluster-name
   K8S_NAMESPACE: default
-  DOCKERFILE_PATH: ./backend/Dockerfile   # Change if Dockerfile is in root
-  CONTEXT_PATH: ./backend                 # Change if Dockerfile is in root
 
 jobs:
   build-and-deploy:
@@ -30,6 +28,22 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+    - name: Detect Dockerfile Path
+      id: detect-path
+      run: |
+        if [ -f "./backend/Dockerfile" ]; then
+          echo "DOCKERFILE_PATH=./backend/Dockerfile" >> $GITHUB_ENV
+          echo "CONTEXT_PATH=./backend" >> $GITHUB_ENV
+          echo "Detected backend folder with Dockerfile"
+        elif [ -f "./Dockerfile" ]; then
+          echo "DOCKERFILE_PATH=./Dockerfile" >> $GITHUB_ENV
+          echo "CONTEXT_PATH=." >> $GITHUB_ENV
+          echo "Detected root Dockerfile"
+        else
+          echo "❌ No Dockerfile found!"
+          exit 1
+        fi
+
     - name: Build and Push Docker Image
       run: |
         echo "Using Dockerfile: $DOCKERFILE_PATH"
@@ -37,7 +51,6 @@ jobs:
         docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${{ github.sha }} $CONTEXT_PATH
         docker push $IMAGE_NAME:${{ github.sha }}
 
-    # ✅ Configure AWS credentials
     - name: Configure AWS CLI
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -45,11 +58,9 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # ✅ Update kubeconfig automatically for EKS
     - name: Update kubeconfig for EKS
       run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-    # ✅ Install kubectl
     - name: Set up Kubectl
       uses: azure/setup-kubectl@v3
       with:

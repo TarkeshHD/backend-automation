@@ -1,13 +1,17 @@
-name: Deploy Backend to Kubernetes
+name: Deploy Backend to AWS EKS
 
 on:
   push:
     branches:
-      - main
+      - main   # Deploy only when main branch is updated
 
 env:
   IMAGE_NAME: tarkeshhd/backend
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: your-cluster-name
   K8S_NAMESPACE: default
+  DOCKERFILE_PATH: ./backend/Dockerfile   # Change if Dockerfile is in root
+  CONTEXT_PATH: ./backend                 # Change if Dockerfile is in root
 
 jobs:
   build-and-deploy:
@@ -28,25 +32,34 @@ jobs:
 
     - name: Build and Push Docker Image
       run: |
-        docker build -t $IMAGE_NAME:${{ github.sha }} .
+        echo "Using Dockerfile: $DOCKERFILE_PATH"
+        echo "Using Build Context: $CONTEXT_PATH"
+        docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${{ github.sha }} $CONTEXT_PATH
         docker push $IMAGE_NAME:${{ github.sha }}
 
+    # ✅ Configure AWS credentials
+    - name: Configure AWS CLI
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    # ✅ Update kubeconfig automatically for EKS
+    - name: Update kubeconfig for EKS
+      run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+
+    # ✅ Install kubectl
     - name: Set up Kubectl
       uses: azure/setup-kubectl@v3
       with:
         version: 'latest'
 
-    - name: Configure Kubeconfig
-      run: |
-        mkdir -p ~/.kube
-        echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
-        chmod 600 ~/.kube/config
-
     - name: Update Kubernetes Deployment Image
       run: |
         sed -i "s|tarkeshhd/backend:latest|$IMAGE_NAME:${{ github.sha }}|" k8s/backend-deployment.yaml
 
-    - name: Deploy to Kubernetes
+    - name: Deploy to EKS
       run: |
         kubectl apply -f k8s/backend-deployment.yaml -n $K8S_NAMESPACE
         kubectl apply -f k8s/backend-service.yaml -n $K8S_NAMESPACE

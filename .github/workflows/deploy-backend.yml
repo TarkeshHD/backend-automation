@@ -1,7 +1,12 @@
-name: Backend Docker Deploy
+name: Backend Docker Build and EKS Deploy
 
 on:
   workflow_dispatch:
+    inputs:
+      eks_cluster_name:
+        description: 'EKS Cluster Name'
+        required: true
+        type: string
 
 env:
   IMAGE_NAME: backend
@@ -9,69 +14,87 @@ env:
   CONTEXT_PATH: ./vrse-builder-backend-main
 
 jobs:
-  docker-build-and-push:
+  backend-deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # ----------------- Create Repo If Not Exists -----------------
-      - name: Create Docker Hub Repo If Missing
-        run: |
-          echo "🔍 Checking if Docker Hub repo exists..."
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -u "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_PASSWORD }}" \
-            https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME/)
-
-          if [ "$RESPONSE" -eq 404 ]; then
-            echo "🚀 Repository doesn't exist. Creating..."
-            curl -s -X POST https://hub.docker.com/v2/repositories/ \
-              -u "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_PASSWORD }}" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "name": "'$IMAGE_NAME'",
-                "namespace": "'${{ secrets.DOCKERHUB_USERNAME }}'",
-                "description": "Backend service",
-                "is_private": false
-              }'
-            echo "✅ Repo created successfully!"
-          else
-            echo "✅ Repo already exists."
-          fi
-
-      # ----------------- Docker Hub Login -----------------
+      # ✅ Docker Hub login
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-      - name: Verify Docker Login
-        run: docker info | grep Username
-
-      # ----------------- Detect Dockerfile -----------------
-      - name: Detect Dockerfile Path
+      # ✅ Build and Push Docker image
+      - name: Build and Push Backend Image
         run: |
-          if [ -f "$DOCKERFILE_PATH" ]; then
-            echo "✅ Detected Dockerfile at $DOCKERFILE_PATH"
+          TAG="${GITHUB_SHA::7}"
+          echo "Building image: ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:$TAG"
+
+          docker build -f $DOCKERFILE_PATH -t ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:$TAG $CONTEXT_PATH
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:$TAG
+
+      # ✅ Install kubectl and eksctl
+      - name: Install tools
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+
+      # ✅ Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # ✅ Check or create EKS cluster
+      - name: Check or create EKS cluster
+        run: |
+          CLUSTER_NAME="${{ github.event.inputs.eks_cluster_name }}"
+          REGION="${{ secrets.AWS_REGION }}"
+
+          echo "Checking if cluster $CLUSTER_NAME exists..."
+          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
+            echo "✅ Cluster $CLUSTER_NAME already exists."
           else
-            echo "❌ Dockerfile not found at $DOCKERFILE_PATH"
-            exit 1
+            echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
+            eksctl create cluster \
+              --name "$CLUSTER_NAME" \
+              --region "$REGION" \
+              --nodegroup-name standard-workers \
+              --node-type t3.medium \
+              --nodes 2 \
+              --nodes-min 1 \
+              --nodes-max 3 \
+              --managed
           fi
 
-      # ----------------- Build and Push -----------------
-      - name: Build and Push Docker Image
+      # ✅ Generate kubeconfig for EKS
+      - name: Generate kubeconfig
         run: |
-          echo "🔨 Building Docker image..."
-          docker build -f $DOCKERFILE_PATH -t ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:${{ github.sha }} $CONTEXT_PATH
-          
-          echo "📤 Pushing image to Docker Hub..."
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:${{ github.sha }}
+          aws eks update-kubeconfig \
+            --name ${{ github.event.inputs.eks_cluster_name }} \
+            --region ${{ secrets.AWS_REGION }}
 
-      # ----------------- Summary -----------------
-      - name: Deployment Summary
+      # ✅ Deploy to EKS
+      - name: Deploy Backend
         run: |
-          echo "## ✅ Docker Image Deployed Successfully" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image**: ${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Repository**: https://hub.docker.com/r/${{ secrets.DOCKERHUB_USERNAME }}/$IMAGE_NAME" >> $GITHUB_STEP_SUMMARY
+          IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/backend"
+          TAG="${GITHUB_SHA::7}"
+          echo "Deploying image: $IMAGE_NAME:$TAG"
+
+          sed -i "s|image: .*|image: $IMAGE_NAME:$TAG|" backend-deployment.yaml
+          kubectl apply -f backend-deployment.yaml
+          kubectl apply -f backend-service.yaml
+
+      # ✅ Verify rollout
+      - name: Verify Deployment
+        run: |
+          kubectl rollout status deployment/backend-deployment

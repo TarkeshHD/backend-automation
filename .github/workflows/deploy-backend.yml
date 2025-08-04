@@ -8,7 +8,7 @@ on:
 env:
   IMAGE_NAME: tarkeshhd/backend
   AWS_REGION: us-east-1
-  EKS_CLUSTER_NAME: your-cluster-name
+  EKS_CLUSTER_NAME: your-cluster-name   # <-- Replace with your EKS cluster name
   K8S_NAMESPACE: default
 
 jobs:
@@ -28,7 +28,6 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    # ✅ Auto-detect Dockerfile
     - name: Detect Dockerfile Location
       run: |
         if [ -f "./backend/Dockerfile" ]; then
@@ -51,7 +50,6 @@ jobs:
         docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${{ github.sha }} $CONTEXT_PATH
         docker push $IMAGE_NAME:${{ github.sha }}
 
-    # ✅ Configure AWS for EKS
     - name: Configure AWS CLI
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -69,12 +67,12 @@ jobs:
 
     - name: Update Kubernetes Deployment Image
       run: |
-        sed -i "s|tarkeshhd/backend:latest|$IMAGE_NAME:${{ github.sha }}|" k8s/backend-deployment.yaml
+        sed -i "s|tarkeshhd/backend:latest|$IMAGE_NAME:${{ github.sha }}|" backend-deployment.yaml
 
     - name: Deploy to EKS
       run: |
-        kubectl apply -f k8s/backend-deployment.yaml -n $K8S_NAMESPACE
-        kubectl apply -f k8s/backend-service.yaml -n $K8S_NAMESPACE
+        kubectl apply -f backend-deployment.yaml -n $K8S_NAMESPACE
+        kubectl apply -f backend-service.yaml -n $K8S_NAMESPACE
 
     - name: Verify Deployment
       run: |

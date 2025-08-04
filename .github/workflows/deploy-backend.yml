@@ -52,14 +52,38 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Install kubectl
-      - name: Install kubectl
+      # ✅ Install kubectl and eksctl
+      - name: Install tools
         run: |
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
           curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Connect to existing EKS cluster
+      # ✅ Create EKS cluster if not exists
+      - name: Ensure EKS Cluster
+        run: |
+          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
+          REGION="${{ secrets.AWS_REGION }}"
+
+          echo "Checking if cluster $CLUSTER_NAME exists..."
+          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
+            echo "✅ Cluster $CLUSTER_NAME already exists."
+          else
+            echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
+            eksctl create cluster \
+              --name "$CLUSTER_NAME" \
+              --region "$REGION" \
+              --nodegroup-name standard-workers \
+              --node-type t3.medium \
+              --nodes 2 \
+              --nodes-min 1 \
+              --nodes-max 3 \
+              --managed
+          fi
+
+      # ✅ Generate kubeconfig for EKS
       - name: Generate kubeconfig
         run: |
           aws eks update-kubeconfig \

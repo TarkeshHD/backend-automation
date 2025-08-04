@@ -61,7 +61,7 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Create EKS cluster if not exists
+      # ✅ Ensure EKS Cluster exists or create it
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
@@ -83,7 +83,7 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig for EKS
+      # ✅ Generate kubeconfig
       - name: Generate kubeconfig
         run: |
           aws eks update-kubeconfig \
@@ -97,9 +97,9 @@ jobs:
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend: $BACKEND_IMAGE:$TAG"
 
-          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
-          kubectl apply -f backend-deployment.yaml
-          kubectl apply -f backend-service.yaml
+          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-service.yaml
 
       # ✅ Verify rollout
       - name: Verify Deployment

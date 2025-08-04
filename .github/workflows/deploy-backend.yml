@@ -1,4 +1,4 @@
-name: Backend EKS Deployment
+name: Backend Deployment
 
 on:
   workflow_dispatch:
@@ -21,31 +21,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ✅ Checkout repository
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # ✅ Install tools
-      - name: Install eksctl & kubectl
+      # ✅ Install AWS CLI
+      - name: Install AWS CLI
         run: |
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          sudo apt-get update
+          sudo apt-get install -y awscli
 
-      # ✅ Configure AWS credentials
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      # ✅ Attach ECR Permissions
-      - name: Attach ECR Policy to IAM User
+      # ✅ Attach ECR Full Access Policy
+      - name: Attach ECR Policy
         run: |
           USER_NAME="github-actions-user-backend"
           POLICY="AmazonEC2ContainerRegistryFullAccess"
 
+          echo "Checking ECR policy for $USER_NAME..."
           if ! aws iam list-attached-user-policies --user-name "$USER_NAME" | grep -q "$POLICY"; then
             aws iam attach-user-policy \
               --user-name "$USER_NAME" \
@@ -54,67 +46,74 @@ jobs:
           else
             echo "🔹 $POLICY already attached."
           fi
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
 
-      # ✅ Create or Get ECR Repository
+      # ✅ Configure AWS credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ✅ Create/Get ECR repository
       - name: Create/Get ECR Repository
         run: |
           aws ecr describe-repositories --repository-names $IMAGE_NAME || \
           aws ecr create-repository --repository-name $IMAGE_NAME
           echo "✅ ECR repository ready."
 
-      # ✅ Login to ECR
-      - name: Docker login to ECR
+      # ✅ Authenticate Docker with ECR
+      - name: Login to Amazon ECR
         run: |
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
-          echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_ENV
-          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+          aws ecr get-login-password --region $AWS_REGION | \
+          docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
 
-      # ✅ Build & Push Docker Image
-      - name: Build and Push Docker image
+      # ✅ Build and push Docker image
+      - name: Build and Push Docker Image
         run: |
-          IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:${GITHUB_SHA::7}"
-          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          ECR_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME}:${GITHUB_SHA::7}"
+          echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
 
-          docker build -f $DOCKERFILE_PATH -t $IMAGE_URI $CONTEXT_PATH
-          docker push $IMAGE_URI
+          echo "Building Docker image..."
+          docker build -f $DOCKERFILE_PATH -t $ECR_IMAGE $CONTEXT_PATH
+          echo "Pushing Docker image..."
+          docker push $ECR_IMAGE
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
 
-      # ✅ Check or create EKS cluster
-      - name: Check/Create EKS Cluster
+      # ✅ Install kubectl and eksctl
+      - name: Install tools
         run: |
-          CLUSTER_NAME="${{ github.event.inputs.eks_cluster_name }}"
-          REGION="${{ env.AWS_REGION }}"
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
-          echo "Checking if cluster $CLUSTER_NAME exists..."
-          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "✅ Cluster $CLUSTER_NAME already exists."
-          else
-            echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
-            eksctl create cluster \
-              --name "$CLUSTER_NAME" \
-              --region "$REGION" \
-              --nodegroup-name standard-workers \
-              --node-type t3.medium \
-              --nodes 2 \
-              --nodes-min 1 \
-              --nodes-max 3 \
-              --managed
-          fi
-
-      # ✅ Generate kubeconfig
+      # ✅ Update kubeconfig
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig \
-            --name ${{ github.event.inputs.eks_cluster_name }} \
-            --region ${{ env.AWS_REGION }}
+            --name "${{ github.event.inputs.eks_cluster_name }}" \
+            --region $AWS_REGION
 
-      # ✅ Deploy backend to EKS
-      - name: Deploy Backend
+      # ✅ Update image in Deployment YAML
+      - name: Update Kubernetes Deployment
         run: |
-          sed -i "s|image: .*|image: $IMAGE_URI|" $DEPLOYMENT_FILE
+          sed -i "s|image: .*|image: ${ECR_IMAGE}|" $DEPLOYMENT_FILE
+
+      # ✅ Deploy to Kubernetes
+      - name: Apply Kubernetes Files
+        run: |
           kubectl apply -f $DEPLOYMENT_FILE
           kubectl apply -f $SERVICE_FILE
 
-      # ✅ Verify rollout
-      - name: Verify Deployment
+      # ✅ Verify deployment
+      - name: Verify Rollout
         run: |
           kubectl rollout status deployment/backend-deployment

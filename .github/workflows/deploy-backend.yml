@@ -1,15 +1,15 @@
-name: Deploy Backend to AWS EKS
+name: Deploy Backend to Kubernetes
 
 on:
   push:
     branches:
-      - main
+      - main   # Trigger deployment on main branch push
 
 env:
   IMAGE_NAME: tarkeshhd/backend
-  AWS_REGION: us-east-1
-  EKS_CLUSTER_NAME: your-cluster-name   # <-- Replace with your EKS cluster name
   K8S_NAMESPACE: default
+  DOCKERFILE_PATH: ./backend/Dockerfile   # ✅ Change this if Dockerfile is in root (./Dockerfile)
+  CONTEXT_PATH: ./backend                 # ✅ Change this if Dockerfile is in root (.)
 
 jobs:
   build-and-deploy:
@@ -28,21 +28,6 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Detect Dockerfile Location
-      run: |
-        if [ -f "./backend/Dockerfile" ]; then
-          echo "DOCKERFILE_PATH=./backend/Dockerfile" >> $GITHUB_ENV
-          echo "CONTEXT_PATH=./backend" >> $GITHUB_ENV
-          echo "✅ Detected backend folder with Dockerfile"
-        elif [ -f "./Dockerfile" ]; then
-          echo "DOCKERFILE_PATH=./Dockerfile" >> $GITHUB_ENV
-          echo "CONTEXT_PATH=." >> $GITHUB_ENV
-          echo "✅ Detected root Dockerfile"
-        else
-          echo "❌ No Dockerfile found!"
-          exit 1
-        fi
-
     - name: Build and Push Docker Image
       run: |
         echo "Using Dockerfile: $DOCKERFILE_PATH"
@@ -50,34 +35,26 @@ jobs:
         docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${{ github.sha }} $CONTEXT_PATH
         docker push $IMAGE_NAME:${{ github.sha }}
 
-    - name: Configure AWS CLI
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Update kubeconfig for EKS
-      run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
-
     - name: Set up Kubectl
       uses: azure/setup-kubectl@v3
       with:
         version: 'latest'
 
+    - name: Configure Kubeconfig
+      run: |
+        mkdir -p ~/.kube
+        echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+        chmod 600 ~/.kube/config
+
     - name: Update Kubernetes Deployment Image
       run: |
-        sed -i "s|tarkeshhd/backend:latest|$IMAGE_NAME:${{ github.sha }}|" backend-deployment.yaml
+        sed -i "s|tarkeshhd/backend:latest|$IMAGE_NAME:${{ github.sha }}|" k8s/backend-deployment.yaml
 
-    - name: Deploy to EKS
+    - name: Deploy to Kubernetes
       run: |
-        kubectl apply -f backend-deployment.yaml -n $K8S_NAMESPACE
-        kubectl apply -f backend-service.yaml -n $K8S_NAMESPACE
+        kubectl apply -f k8s/backend-deployment.yaml -n $K8S_NAMESPACE
+        kubectl apply -f k8s/backend-service.yaml -n $K8S_NAMESPACE
 
     - name: Verify Deployment
       run: |
-        kubectl rollout status deployment/backend-deployment -n $K8S_NAMESPACE || (
-          echo "❌ Deployment failed. Rolling back..."
-          kubectl rollout undo deployment/backend-deployment -n $K8S_NAMESPACE
-          exit 1
-        )
+        kubectl rollout status deployment/backend-deployment -n $K8S_NAMESPACE

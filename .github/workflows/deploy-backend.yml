@@ -1,109 +1,102 @@
-name: Backend Deployment to EKS
+name: Backend CI/CD with EKS Auto Create
 
 on:
-  workflow_dispatch:
-    inputs:
-      eks_cluster_name:
-        description: 'EKS Cluster Name'
-        required: true
-        type: string
+  push:
+    branches:
+      - main
 
 env:
   AWS_REGION: us-east-1
+  CLUSTER_NAME: Backend-deploy-1234
   IMAGE_NAME: backend
-  DOCKERFILE_PATH: ./vrse-builder-backend-main/Dockerfile
-  CONTEXT_PATH: ./vrse-builder-backend-main
   DEPLOYMENT_FILE: backend-deployment.yaml
   SERVICE_FILE: backend-service.yaml
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repository
-      - name: Checkout
+      # ✅ Checkout repo
+      - name: Checkout Code
         uses: actions/checkout@v3
 
-      # ✅ Install AWS CLI
-      - name: Install AWS CLI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip curl
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install --update
-
       # ✅ Configure AWS credentials
-      - name: Configure AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ✅ Attach IAM policies for EKS access
-      - name: Attach EKS IAM Policies
-        run: |
-          USER_NAME="github-actions-user-backend"
-          POLICIES=(
-            "AmazonEKSClusterPolicy"
-            "AmazonEKSWorkerNodePolicy"
-            "AmazonEKS_CNI_Policy"
-            "AmazonEC2ContainerRegistryFullAccess"
-            "IAMFullAccess"
-            "AmazonEC2FullAccess"
-          )
-
-          for POLICY in "${POLICIES[@]}"; do
-            if ! aws iam list-attached-user-policies --user-name "$USER_NAME" | grep -q "$POLICY"; then
-              aws iam attach-user-policy \
-                --user-name "$USER_NAME" \
-                --policy-arn arn:aws:iam::aws:policy/$POLICY
-              echo "✅ Attached $POLICY"
-            else
-              echo "🔹 $POLICY already attached."
-            fi
-          done
-
-      # ✅ Ensure ECR repository exists
-      - name: Create ECR repository if not exists
-        run: |
-          if ! aws ecr describe-repositories --repository-names $IMAGE_NAME >/dev/null 2>&1; then
-            aws ecr create-repository --repository-name $IMAGE_NAME
-            echo "✅ Created ECR repository $IMAGE_NAME"
-          else
-            echo "🔹 ECR repository $IMAGE_NAME already exists."
-          fi
-
-      # ✅ Login to Amazon ECR
+      # ✅ Login to ECR
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@v1
 
-      # ✅ Build and push Docker image
+      # ✅ Create ECR repository if it doesn't exist
+      - name: Create ECR Repository
+        run: |
+          aws ecr describe-repositories --repository-names $IMAGE_NAME || \
+          aws ecr create-repository --repository-name $IMAGE_NAME
+        env:
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+
+      # ✅ Build and Push Docker Image
       - name: Build and Push Docker Image
         run: |
-          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${IMAGE_NAME}:${GITHUB_SHA::7}"
-          echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
-          docker build -f $DOCKERFILE_PATH -t $ECR_IMAGE $CONTEXT_PATH
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          ECR_IMAGE="$ECR_REGISTRY/$IMAGE_NAME:${GITHUB_SHA::7}"
+
+          echo "Building Docker image..."
+          docker build -f ./vrse-builder-backend-main/Dockerfile -t $ECR_IMAGE ./vrse-builder-backend-main
+
+          echo "Pushing image to ECR..."
           docker push $ECR_IMAGE
 
-      # ✅ Update kubeconfig
-      - name: Update kubeconfig for EKS
+          echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
+
+      # ✅ Install eksctl and kubectl
+      - name: Install eksctl and kubectl
         run: |
-          aws eks update-kubeconfig \
-            --name "${{ github.event.inputs.eks_cluster_name }}" \
-            --region $AWS_REGION
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin
+
+      # ✅ Check or create EKS cluster
+      - name: Check or Create EKS Cluster
+        run: |
+          echo "Checking if cluster $CLUSTER_NAME exists..."
+          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "✅ Cluster $CLUSTER_NAME already exists."
+          else
+            echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
+            eksctl create cluster \
+              --name "$CLUSTER_NAME" \
+              --region "$AWS_REGION" \
+              --nodegroup-name standard-workers \
+              --node-type t3.medium \
+              --nodes 2 \
+              --nodes-min 1 \
+              --nodes-max 3 \
+              --managed
+          fi
+
+      # ✅ Update kubeconfig
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
 
       # ✅ Deploy backend
-      - name: Deploy Backend to EKS
+      - name: Deploy Backend
         run: |
+          echo "Updating Kubernetes deployment image..."
           sed -i "s|image: .*|image: $ECR_IMAGE|" $DEPLOYMENT_FILE
           kubectl apply -f $DEPLOYMENT_FILE
           kubectl apply -f $SERVICE_FILE
 
       # ✅ Verify rollout
-      - name: Verify Deployment Rollout
+      - name: Verify Deployment
         run: |
           kubectl rollout status deployment/backend-deployment

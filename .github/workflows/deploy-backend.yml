@@ -1,93 +1,81 @@
-name: Backend Deployment to AWS EKS
+name: Deploy Backend to AWS EKS
 
 on:
   workflow_dispatch:
     inputs:
-      eks_cluster_name:
+      cluster_name:
         description: 'EKS Cluster Name'
+        required: true
+        type: string
+      aws_account_id:
+        description: 'AWS Account ID'
         required: true
         type: string
 
 env:
   AWS_REGION: us-east-1
-  IMAGE_NAME: tarkeshhd/backend
+  IMAGE_NAME: backend
   DOCKERFILE_PATH: ./vrse-builder-backend-main/Dockerfile
   CONTEXT_PATH: ./vrse-builder-backend-main
   DEPLOYMENT_FILE: backend-deployment.yaml
   SERVICE_FILE: backend-service.yaml
 
 jobs:
-  deploy-backend:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout Code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Install tools
-      run: |
-        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-        sudo mv /tmp/eksctl /usr/local/bin
-        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-
-    - name: Configure AWS credentials
+    - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v2
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Attach Required IAM Policies
+    # ✅ Create ECR repository if not exists
+    - name: Create ECR Repository
       run: |
-        USER_NAME="github-actions-user-backend"
+        aws ecr describe-repositories --repository-names $IMAGE_NAME || \
+        aws ecr create-repository --repository-name $IMAGE_NAME
+        echo "✅ ECR repository ready."
 
-        POLICIES=(
-          "AmazonEKSClusterPolicy"
-          "AmazonEKSServicePolicy"
-          "AmazonEC2FullAccess"
-          "IAMFullAccess"
-          "AWSCloudFormationFullAccess"
-        )
+    # ✅ Docker Login to ECR
+    - name: Docker Login to ECR
+      run: |
+        aws ecr get-login-password --region $AWS_REGION | \
+        docker login --username AWS --password-stdin ${{ github.event.inputs.aws_account_id }}.dkr.ecr.$AWS_REGION.amazonaws.com
 
-        for POLICY in "${POLICIES[@]}"; do
-          POLICY_ARN="arn:aws:iam::aws:policy/$POLICY"
-          if ! aws iam list-attached-user-policies --user-name "$USER_NAME" | grep -q "$POLICY"; then
-            aws iam attach-user-policy \
-              --user-name "$USER_NAME" \
-              --policy-arn "$POLICY_ARN"
-            echo "✅ Attached $POLICY to $USER_NAME"
-          else
-            echo "🔹 $POLICY already attached."
-          fi
-        done
-
-    - name: Docker Login
-      uses: docker/login-action@v2
-      with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
-
+    # ✅ Build and Push Docker Image
     - name: Build and Push Docker Image
       run: |
-        echo "Using Dockerfile: $DOCKERFILE_PATH"
-        echo "Using Build Context: $CONTEXT_PATH"
-        docker build -f $DOCKERFILE_PATH -t $IMAGE_NAME:${GITHUB_SHA} $CONTEXT_PATH
-        docker push $IMAGE_NAME:${GITHUB_SHA}
+        IMAGE_URI=${{ github.event.inputs.aws_account_id }}.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:${GITHUB_SHA}
+        echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+        docker build -f $DOCKERFILE_PATH -t $IMAGE_URI $CONTEXT_PATH
+        docker push $IMAGE_URI
 
+    # ✅ Install kubectl and eksctl
+    - name: Install tools
+      run: |
+        sudo curl -Lo /usr/local/bin/kubectl https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl
+        sudo chmod +x /usr/local/bin/kubectl
+        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+        sudo mv /tmp/eksctl /usr/local/bin
+
+    # ✅ Check or create EKS cluster
     - name: Check or create EKS cluster
       run: |
-        CLUSTER_NAME="${{ github.event.inputs.eks_cluster_name }}"
-        REGION="${{ env.AWS_REGION }}"
-
+        CLUSTER_NAME="${{ github.event.inputs.cluster_name }}"
         echo "Checking if cluster $CLUSTER_NAME exists..."
-        if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
+        if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
           echo "✅ Cluster $CLUSTER_NAME already exists."
         else
           echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
           eksctl create cluster \
             --name "$CLUSTER_NAME" \
-            --region "$REGION" \
+            --region "$AWS_REGION" \
             --nodegroup-name standard-workers \
             --node-type t3.medium \
             --nodes 2 \
@@ -96,18 +84,21 @@ jobs:
             --managed
         fi
 
+    # ✅ Generate kubeconfig
     - name: Generate kubeconfig
       run: |
         aws eks update-kubeconfig \
-          --name ${{ github.event.inputs.eks_cluster_name }} \
-          --region ${{ env.AWS_REGION }}
+          --name ${{ github.event.inputs.cluster_name }} \
+          --region $AWS_REGION
 
+    # ✅ Deploy backend to EKS
     - name: Deploy Backend
       run: |
-        sed -i "s|image: .*|image: $IMAGE_NAME:${GITHUB_SHA}|" $DEPLOYMENT_FILE
+        sed -i "s|image: .*|image: $IMAGE_URI|" $DEPLOYMENT_FILE
         kubectl apply -f $DEPLOYMENT_FILE
         kubectl apply -f $SERVICE_FILE
 
+    # ✅ Verify rollout
     - name: Verify Deployment
       run: |
         kubectl rollout status deployment/backend-deployment

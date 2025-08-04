@@ -27,30 +27,14 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Detect backend folder automatically
-      - name: Detect Backend Path
-        id: detect-backend
-        run: |
-          if [ -f "./backend/Dockerfile" ]; then
-            echo "path=./backend" >> $GITHUB_OUTPUT
-          elif [ -f "./services/backend/Dockerfile" ]; then
-            echo "path=./services/backend" >> $GITHUB_OUTPUT
-          elif [ -f "./Dockerfile" ]; then
-            echo "path=." >> $GITHUB_OUTPUT
-          else
-            echo "❌ No backend Dockerfile found!"
-            exit 1
-          fi
-
       # ✅ Build and push backend image to ECR
       - name: Build and Push Backend Docker image
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          BACKEND_PATH="${{ steps.detect-backend.outputs.path }}"
-          echo "Building backend image: $BACKEND_IMAGE:$TAG from $BACKEND_PATH"
+          echo "Building backend image: $BACKEND_IMAGE:$TAG from vrse-builder-backend-main"
 
-          docker build -f "$BACKEND_PATH/Dockerfile" -t "$BACKEND_IMAGE:$TAG" -t "$BACKEND_IMAGE:latest" "$BACKEND_PATH"
+          docker build -f vrse-builder-backend-main/Dockerfile -t "$BACKEND_IMAGE:$TAG" -t "$BACKEND_IMAGE:latest" ./vrse-builder-backend-main
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
@@ -97,8 +81,8 @@ jobs:
           echo "Deploying backend: $BACKEND_IMAGE:$TAG"
 
           sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" k8s/backend-deployment.yaml
-          kubectl apply -f backend-deployment.yaml
-          kubectl apply -f backend-service.yaml
+          kubectl apply -f k8s/backend-deployment.yaml
+          kubectl apply -f k8s/backend-service.yaml
 
       # ✅ Verify rollout
       - name: Verify Deployment

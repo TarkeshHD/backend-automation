@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repository
+      # ✅ Checkout repo
       - uses: actions/checkout@v3
 
       # ✅ Setup Docker Buildx
@@ -21,6 +21,23 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
+      # ✅ Ensure IAM permissions for amplify-dev user
+      - name: Attach IAM Policies to amplify-dev
+        run: |
+          USER_NAME="amplify-dev"
+          POLICIES=("AmazonEKSClusterPolicy" "AmazonEKSWorkerNodePolicy" "AmazonEC2FullAccess" "IAMFullAccess" "CloudFormationFullAccess" "AmazonEKSServicePolicy" "AmazonEC2ContainerRegistryFullAccess")
+
+          for POLICY in "${POLICIES[@]}"; do
+            if ! aws iam list-attached-user-policies --user-name "$USER_NAME" | grep -q "$POLICY"; then
+              aws iam attach-user-policy \
+                --user-name "$USER_NAME" \
+                --policy-arn arn:aws:iam::aws:policy/$POLICY
+              echo "✅ Attached $POLICY to $USER_NAME"
+            else
+              echo "🔹 $POLICY already attached."
+            fi
+          done
 
       # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR
@@ -38,7 +55,7 @@ jobs:
             echo "ECR repository $REPO_NAME already exists."
           fi
 
-      # ✅ Build and push backend image to ECR
+      # ✅ Build and push backend image
       - name: Build and Push Backend Docker image
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
@@ -61,18 +78,18 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Ensure EKS Cluster (check Cluster + CloudFormation Stack)
+      # ✅ Ensure EKS Cluster
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
           STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
 
-          echo "Checking if EKS cluster or stack exists..."
+          echo "Checking if cluster $CLUSTER_NAME exists..."
           if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
             echo "✅ Cluster $CLUSTER_NAME already exists."
           elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "⚠️ CloudFormation stack $STACK_NAME already exists. Skipping creation."
+            echo "⚠️ Stack $STACK_NAME exists. Skipping cluster creation."
           else
             echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
             eksctl create cluster \
@@ -100,10 +117,7 @@ jobs:
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend: $BACKEND_IMAGE:$TAG"
 
-          # Update image in deployment YAML
           sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
-
-          # Apply both deployment and service
           kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
           kubectl apply -f vrse-builder-backend-main/backend-service.yaml
 

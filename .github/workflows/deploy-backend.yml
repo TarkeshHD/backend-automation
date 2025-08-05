@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repo
+      # ✅ Checkout repository
       - uses: actions/checkout@v3
 
       # ✅ Setup Docker Buildx
@@ -61,15 +61,18 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Ensure EKS Cluster exists or create it
+      # ✅ Ensure EKS Cluster (check Cluster + CloudFormation Stack)
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
+          STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
 
-          echo "Checking if cluster $CLUSTER_NAME exists..."
+          echo "Checking if EKS cluster or stack exists..."
           if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
             echo "✅ Cluster $CLUSTER_NAME already exists."
+          elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
+            echo "⚠️ CloudFormation stack $STACK_NAME already exists. Skipping creation."
           else
             echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
             eksctl create cluster \
@@ -90,22 +93,19 @@ jobs:
             --name ${{ secrets.EKS_CLUSTER_NAME }} \
             --region ${{ secrets.AWS_REGION }}
 
-      # ✅ Verify kubectl access
-      - name: Verify Kubernetes Access
-        run: |
-          echo "Checking Kubernetes cluster access..."
-          kubectl get nodes
-
-      # ✅ Deploy Backend
+      # ✅ Deploy Backend (Deployment + Service)
       - name: Deploy Backend
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend: $BACKEND_IMAGE:$TAG"
 
+          # Update image in deployment YAML
           sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
-          kubectl apply --validate=false -f vrse-builder-backend-main/backend-deployment.yaml
-          kubectl apply --validate=false -f vrse-builder-backend-main/backend-service.yaml
+
+          # Apply both deployment and service
+          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-service.yaml
 
       # ✅ Verify rollout
       - name: Verify Deployment

@@ -28,7 +28,7 @@ spec:
             - name: MONGODB_PASSWORD
               value: "admin"
             - name: MONGODB_HOST
-              value: "localhost"
+              value: "mongodb-service"
             - name: MONGODB_PORT
               value: "27017"
             - name: MONGODB_DB_NAME
@@ -41,7 +41,25 @@ spec:
               memory: "512Mi"
               cpu: "500m"
 
-        # ✅ MongoDB Container
+---
+# ✅ MongoDB Deployment (Separate Deployment)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb-deployment
+  labels:
+    app: mongodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
         - name: mongodb-container
           image: mongo:6.0
           ports:
@@ -54,12 +72,26 @@ spec:
           volumeMounts:
             - name: mongo-storage
               mountPath: /data/db
-
-      # ✅ Volume for MongoDB data persistence
       volumes:
         - name: mongo-storage
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: mongo-pvc
+
 ---
+# ✅ Persistent Volume Claim for MongoDB
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongo-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# ✅ Service for Backend
 apiVersion: v1
 kind: Service
 metadata:
@@ -72,3 +104,18 @@ spec:
       port: 80
       targetPort: 5000
   type: LoadBalancer
+
+---
+# ✅ Service for MongoDB (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-service
+spec:
+  selector:
+    app: mongodb
+  ports:
+    - protocol: TCP
+      port: 27017
+      targetPort: 27017
+  type: ClusterIP

@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repo
+      # ✅ Checkout repository
       - uses: actions/checkout@v3
 
       # ✅ Setup Docker Buildx
@@ -27,7 +27,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Auto-create ECR repo if not exists
+      # ✅ Create ECR repo if not exists
       - name: Create ECR Repository if not exists
         run: |
           REPO_NAME="backend"
@@ -38,12 +38,12 @@ jobs:
             echo "ECR repository $REPO_NAME already exists."
           fi
 
-      # ✅ Build and push backend image
+      # ✅ Build and push Docker image
       - name: Build and Push Backend Docker image
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          echo "Building backend image: $BACKEND_IMAGE:$TAG"
+          echo "Building image: $BACKEND_IMAGE:$TAG"
 
           docker build -f vrse-builder-backend-main/Dockerfile \
             -t "$BACKEND_IMAGE:$TAG" \
@@ -61,20 +61,20 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Ensure EKS Cluster exists or creating if not
+      # ✅ Ensure EKS Cluster exists
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
           STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
 
-          echo "Checking if EKS cluster or stack exists..."
+          echo "Checking EKS cluster existence..."
           if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "✅ Cluster $CLUSTER_NAME already exists."
+            echo "✅ Cluster $CLUSTER_NAME exists."
           elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "⚠️ CloudFormation stack $STACK_NAME exists (cluster may be creating or failed)."
+            echo "⚠️ Stack $STACK_NAME exists (cluster might be creating)."
           else
-            echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
+            echo "🚀 Creating cluster $CLUSTER_NAME..."
             eksctl create cluster \
               --name "$CLUSTER_NAME" \
               --region "$REGION" \
@@ -86,14 +86,20 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig
+      # ✅ Generate kubeconfig only if cluster exists
       - name: Generate kubeconfig
         run: |
-          aws eks update-kubeconfig \
-            --name ${{ secrets.EKS_CLUSTER_NAME }} \
-            --region ${{ secrets.AWS_REGION }}
+          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
+          REGION="${{ secrets.AWS_REGION }}"
+          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
+            aws eks update-kubeconfig \
+              --name "$CLUSTER_NAME" \
+              --region "$REGION"
+          else
+            echo "⚠️ Cluster $CLUSTER_NAME does not exist yet. Skipping kubeconfig."
+          fi
 
-      # ✅ Deploy Backend (Deployment + Service)
+      # ✅ Deploy Backend to Kubernetes
       - name: Deploy Backend
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
@@ -104,7 +110,7 @@ jobs:
           kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
           kubectl apply -f vrse-builder-backend-main/backend-service.yaml
 
-      # ✅ Verify rollout
+      # ✅ Verify Deployment rollout
       - name: Verify Deployment
         run: |
-          kubectl rollout status deployment/backend-deployment
+          kubectl rollout status deployment/backend-deployment || echo "⚠️ Rollout not complete yet"

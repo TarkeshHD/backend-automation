@@ -8,13 +8,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repo
       - uses: actions/checkout@v3
 
-      # ✅ Setup Docker Buildx
       - uses: docker/setup-buildx-action@v2
 
-      # ✅ Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -22,23 +19,17 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Auto-create ECR repo if not exists
       - name: Create ECR Repository if not exists
         run: |
           REPO_NAME="backend"
           if ! aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1; then
-            echo "Creating ECR repository: $REPO_NAME"
             aws ecr create-repository --repository-name $REPO_NAME
-          else
-            echo "ECR repository $REPO_NAME already exists."
           fi
 
-      # ✅ Build and push backend image to ECR
       - name: Build and Push Backend Docker image
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
@@ -52,7 +43,6 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Install kubectl and eksctl
       - name: Install tools
         run: |
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
@@ -61,17 +51,11 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Ensure EKS Cluster exists or create it
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
-
-          echo "Checking if cluster $CLUSTER_NAME exists..."
-          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "✅ Cluster $CLUSTER_NAME already exists."
-          else
-            echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
+          if ! aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
             eksctl create cluster \
               --name "$CLUSTER_NAME" \
               --region "$REGION" \
@@ -83,25 +67,29 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig
       - name: Generate kubeconfig
         run: |
           aws eks update-kubeconfig \
             --name ${{ secrets.EKS_CLUSTER_NAME }} \
             --region ${{ secrets.AWS_REGION }}
 
-      # ✅ Deploy Backend
-      - name: Deploy Backend
+      - name: Deploy Backend Deployment
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          echo "Deploying backend: $BACKEND_IMAGE:$TAG"
 
-          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
+          echo "Updating backend image in deployment..."
+          sed -i "/name: backend-container/{n;s|image:.*|image: $BACKEND_IMAGE:$TAG|}" \
+            vrse-builder-backend-main/backend-deployment.yaml
+
+          echo "Applying backend deployment..."
           kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
+
+      - name: Deploy Backend Service
+        run: |
+          echo "Applying backend service..."
           kubectl apply -f vrse-builder-backend-main/backend-service.yaml
 
-      # ✅ Verify rollout
-      - name: Verify Deployment
+      - name: Verify Backend Deployment
         run: |
           kubectl rollout status deployment/backend-deployment

@@ -8,13 +8,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repo
+      # ✅ Checkout repository
       - uses: actions/checkout@v3
 
-      # ✅ Setup Docker Buildx
-      - uses: docker/setup-buildx-action@v2
-
-      # ✅ Configure AWS credentials
+      # ✅ Setup AWS Credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -22,22 +19,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ Ensure IAM permissions for amplify-dev user
-      - name: Attach IAM Policies to amplify-dev
+      # ✅ Install eksctl and kubectl
+      - name: Install eksctl and kubectl
         run: |
-          USER_NAME="amplify-dev"
-          POLICIES=("AmazonEKSClusterPolicy" "AmazonEKSWorkerNodePolicy" "AmazonEC2FullAccess" "IAMFullAccess" "CloudFormationFullAccess" "AmazonEKSServicePolicy" "AmazonEC2ContainerRegistryFullAccess")
-
-          for POLICY in "${POLICIES[@]}"; do
-            if ! aws iam list-attached-user-policies --user-name "$USER_NAME" | grep -q "$POLICY"; then
-              aws iam attach-user-policy \
-                --user-name "$USER_NAME" \
-                --policy-arn arn:aws:iam::aws:policy/$POLICY
-              echo "✅ Attached $POLICY to $USER_NAME"
-            else
-              echo "🔹 $POLICY already attached."
-            fi
-          done
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
       # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR
@@ -55,7 +44,7 @@ jobs:
             echo "ECR repository $REPO_NAME already exists."
           fi
 
-      # ✅ Build and push backend image
+      # ✅ Build and Push Backend Docker image
       - name: Build and Push Backend Docker image
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
@@ -69,29 +58,20 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Install kubectl and eksctl
-      - name: Install tools
-        run: |
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
-          curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
-
-      # ✅ Ensure EKS Cluster
+      # ✅ Ensure EKS Cluster exists or create it
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
           STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
 
-          echo "Checking if cluster $CLUSTER_NAME exists..."
+          echo "🔍 Checking EKS cluster..."
           if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "✅ Cluster $CLUSTER_NAME already exists."
+            echo "✅ Cluster $CLUSTER_NAME exists."
           elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "⚠️ Stack $STACK_NAME exists. Skipping cluster creation."
+            echo "⚠️ Stack $STACK_NAME exists. Skipping creation."
           else
-            echo "🚀 Creating EKS cluster $CLUSTER_NAME..."
+            echo "🚀 Creating new EKS cluster: $CLUSTER_NAME..."
             eksctl create cluster \
               --name "$CLUSTER_NAME" \
               --region "$REGION" \
@@ -103,19 +83,26 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig
+      # ✅ Generate kubeconfig (only if cluster is active)
       - name: Generate kubeconfig
         run: |
-          aws eks update-kubeconfig \
-            --name ${{ secrets.EKS_CLUSTER_NAME }} \
-            --region ${{ secrets.AWS_REGION }}
+          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
+          REGION="${{ secrets.AWS_REGION }}"
 
-      # ✅ Deploy Backend (Deployment + Service)
-      - name: Deploy Backend
+          echo "⌛ Waiting for cluster to be active..."
+          aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
+
+          echo "🔑 Updating kubeconfig..."
+          aws eks update-kubeconfig \
+            --name "$CLUSTER_NAME" \
+            --region "$REGION"
+
+      # ✅ Deploy Backend and MongoDB
+      - name: Deploy Backend and MongoDB
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          echo "Deploying backend: $BACKEND_IMAGE:$TAG"
+          echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
 
           sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
           kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml

@@ -1,4 +1,4 @@
-name: Deploy Backend to EKS
+name: Deploy Backend & MongoDB to EKS
 
 on:
   workflow_dispatch:
@@ -83,7 +83,7 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig
+      # ✅ Generate kubeconfig (only if cluster is active)
       - name: Generate kubeconfig
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
@@ -106,7 +106,7 @@ jobs:
           kubectl apply -f vrse-builder-backend-main/mongo-pdb.yaml
           kubectl apply -f vrse-builder-backend-main/mongo-rbac.yaml
 
-      # ✅ Deploy Backend
+      # ✅ Deploy Backend (connects to MongoDB)
       - name: Deploy Backend
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"

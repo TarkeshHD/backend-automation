@@ -83,7 +83,7 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig (only if cluster is active)
+      # ✅ Generate kubeconfig
       - name: Generate kubeconfig
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
@@ -97,8 +97,17 @@ jobs:
             --name "$CLUSTER_NAME" \
             --region "$REGION"
 
-      # ✅ Deploy Backend and MongoDB
-      - name: Deploy Backend and MongoDB
+      # ✅ Deploy MongoDB (fully containerized with persistent storage and RBAC)
+      - name: Deploy MongoDB
+        run: |
+          kubectl apply -f vrse-builder-backend-main/mongo-pvc.yaml
+          kubectl apply -f vrse-builder-backend-main/mongo-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/mongo-service.yaml
+          kubectl apply -f vrse-builder-backend-main/mongo-pdb.yaml
+          kubectl apply -f vrse-builder-backend-main/mongo-rbac.yaml
+
+      # ✅ Deploy Backend
+      - name: Deploy Backend
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"

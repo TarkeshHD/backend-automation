@@ -1,4 +1,4 @@
-name: Deploy Backend & MongoDB to EKS
+name: Deploy Backend to EKS (with MongoDB)
 
 on:
   workflow_dispatch:
@@ -58,7 +58,7 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Ensure EKS Cluster exists or create it
+      # ✅ Ensure EKS Cluster (auto-create if missing)
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
@@ -83,15 +83,13 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig (only if cluster is active)
+      # ✅ Generate kubeconfig
       - name: Generate kubeconfig
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
-
           echo "⌛ Waiting for cluster to be active..."
           aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
-
           echo "🔑 Updating kubeconfig..."
           aws eks update-kubeconfig \
             --name "$CLUSTER_NAME" \
@@ -106,7 +104,7 @@ jobs:
           kubectl apply -f vrse-builder-backend-main/mongo-pdb.yaml
           kubectl apply -f vrse-builder-backend-main/mongo-rbac.yaml
 
-      # ✅ Deploy Backend (connects to MongoDB)
+      # ✅ Deploy Backend
       - name: Deploy Backend
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"

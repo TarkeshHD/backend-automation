@@ -1,4 +1,4 @@
-name: Deploy Backend to EKS (with MongoDB)
+name: Deploy Backend and MongoDB to EKS
 
 on:
   workflow_dispatch:
@@ -58,7 +58,7 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Ensure EKS Cluster (auto-create if missing)
+      # ✅ Ensure EKS Cluster exists
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
@@ -88,8 +88,10 @@ jobs:
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
+
           echo "⌛ Waiting for cluster to be active..."
           aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
+
           echo "🔑 Updating kubeconfig..."
           aws eks update-kubeconfig \
             --name "$CLUSTER_NAME" \
@@ -97,23 +99,25 @@ jobs:
 
       # ✅ Deploy MongoDB (fully containerized with persistent storage and RBAC)
       - name: Deploy MongoDB
+        working-directory: vrse-builder-backend-main
         run: |
-          kubectl apply -f vrse-builder-backend-main/mongo-pvc.yaml
-          kubectl apply -f vrse-builder-backend-main/mongo-deployment.yaml
-          kubectl apply -f vrse-builder-backend-main/mongo-service.yaml
-          kubectl apply -f vrse-builder-backend-main/mongo-pdb.yaml
-          kubectl apply -f vrse-builder-backend-main/mongo-rbac.yaml
+          kubectl apply -f mongo-pvc.yaml
+          kubectl apply -f mongo-deployment.yaml
+          kubectl apply -f mongo-service.yaml
+          kubectl apply -f mongo-pdb.yaml
+          kubectl apply -f mongo-rbac.yaml
 
       # ✅ Deploy Backend
       - name: Deploy Backend
+        working-directory: vrse-builder-backend-main
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
 
-          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
-          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
-          kubectl apply -f vrse-builder-backend-main/backend-service.yaml
+          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
+          kubectl apply -f backend-deployment.yaml
+          kubectl apply -f backend-service.yaml
 
       # ✅ Verify rollout
       - name: Verify Deployment

@@ -4,6 +4,8 @@ metadata:
   name: mongodb
   labels:
     app: mongodb
+  finalizers:
+    - protect.pod/deletion
 spec:
   replicas: 1
   selector:
@@ -15,7 +17,7 @@ spec:
         app: mongodb
     spec:
       containers:
-        - name: mongodb-container
+        - name: mongodb
           image: mongo:6.0
           ports:
             - containerPort: 27017
@@ -25,9 +27,9 @@ spec:
             - name: MONGO_INITDB_ROOT_PASSWORD
               value: "admin"
           volumeMounts:
-            - name: mongo-storage
+            - name: mongo-data
               mountPath: /data/db
       volumes:
-        - name: mongo-storage
+        - name: mongo-data
           persistentVolumeClaim:
             claimName: mongodb-pvc

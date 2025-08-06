@@ -101,11 +101,12 @@ jobs:
       - name: Deploy MongoDB
         working-directory: vrse-builder-backend-main
         run: |
-          kubectl apply -f mongo-pvc.yaml
-          kubectl apply -f mongo-deployment.yaml
-          kubectl apply -f mongo-service.yaml
-          kubectl apply -f mongo-pdb.yaml
-          kubectl apply -f mongo-rbac.yaml
+          kubectl apply -f mongodb-pvc.yaml
+          kubectl apply -f mongodb-deployment.yaml
+          kubectl apply -f mongodb-service.yaml
+          kubectl apply -f mongodb-poddisruptionbudget.yaml
+          kubectl apply -f rbac-restrict-delete.yaml
+
 
       # ✅ Deploy Backend
       - name: Deploy Backend

@@ -51,6 +51,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
+    # IAM Role for EC2
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role
       run: |
@@ -89,6 +90,7 @@ jobs:
         PROFILE_ARN=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Arn' --output text)
         echo "PROFILE_ARN=$PROFILE_ARN" >> $GITHUB_OUTPUT
 
+    # Security Group
     - name: Create Security Group
       id: create-sg
       run: |
@@ -110,6 +112,7 @@ jobs:
           echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
         fi
 
+    # Key Pair
     - name: Create EC2 Key Pair
       id: create-key
       run: |
@@ -128,6 +131,7 @@ jobs:
         name: ec2-private-key
         path: ${{ steps.create-key.outputs.KEY_NAME }}.pem
 
+    # Get Ubuntu AMI
     - name: Get Latest Ubuntu AMI
       id: get-ami
       run: |
@@ -138,6 +142,7 @@ jobs:
           --output text)
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
+    # Launch EC2 Instance (cloud-init + app stack)
     - name: Launch EC2 Instance
       id: launch-instance
       env:
@@ -149,26 +154,33 @@ jobs:
         cat > user-data.sh << 'EOF'
         #!/bin/bash
 
-        # Set environment variables
+        # Set environment variables (persist for all shells)
         echo 'export ENV_VAR1="val1"' | sudo tee -a /etc/profile
         echo 'export ENV_VAR2="val2"' | sudo tee -a /etc/profile
+        # Also set AWS_REGION for this session if not defined (and persist)
+        if ! grep -q 'export AWS_REGION=' /etc/profile; then
+          REGION_DETECTED=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep region | awk -F\" '{print $4}')
+          echo "export AWS_REGION=\"$REGION_DETECTED\"" | sudo tee -a /etc/profile
+        fi
         source /etc/profile
 
         sudo apt-get update -y
-        sudo apt-get install -y ruby wget curl gnupg git nginx software-properties-common
+        sudo apt-get install -y ruby wget curl gnupg git nginx software-properties-common jq
 
-        # CodeDeploy Agent
+        # CodeDeploy Agent (region-aware)
         cd /home/ubuntu
-        wget https://aws-codedeploy-${AWS_REGION}.s3.${AWS_REGION}.amazonaws.com/latest/install
+        REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region)
+        wget "https://aws-codedeploy-${REGION}.s3.${REGION}.amazonaws.com/latest/install"
         chmod +x ./install
         ./install auto
-        sudo service codedeploy-agent start
+        sudo systemctl enable codedeploy-agent
+        sudo systemctl start codedeploy-agent
 
         # Node.js
         curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
         sudo apt-get install -y nodejs
 
-        # MongoDB
+        # MongoDB 7.0
         curl -fsSL https://pgp.mongodb.com/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
         echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
         sudo apt-get update -y
@@ -191,10 +203,10 @@ jobs:
         GH_TOKEN="${GH_PAT}"
         REPO_NAME="your-repository"
         BRANCH="main"
-        sudo git clone -b $BRANCH https://$GH_USER:$GH_TOKEN@github.com/$GH_USER/$REPO_NAME.git
-        sudo chown -R ubuntu:ubuntu $REPO_NAME
+        sudo git clone -b "$BRANCH" "https://${GH_USER}:${GH_TOKEN}@github.com/${GH_USER}/${REPO_NAME}.git"
+        sudo chown -R ubuntu:ubuntu "$REPO_NAME"
 
-        cd /home/ubuntu/$REPO_NAME
+        cd "/home/ubuntu/${REPO_NAME}"
         npm install
 
         # PM2
@@ -253,4 +265,31 @@ jobs:
           --query 'Instances[0].InstanceId' \
           --output text)
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
-        aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+
+        # Wait until running before associating EIP
+        aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+
+    # Allocate & associate Elastic IP
+    - name: Allocate Elastic IP
+      id: allocate-eip
+      run: |
+        ALLOC_JSON=$(aws ec2 allocate-address --domain vpc)
+        ALLOC_ID=$(echo "$ALLOC_JSON" | jq -r .AllocationId)
+        PUBLIC_IP=$(echo "$ALLOC_JSON" | jq -r .PublicIp)
+        echo "ALLOCATION_ID=$ALLOC_ID" >> $GITHUB_OUTPUT
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
+        echo "Allocated Elastic IP: $PUBLIC_IP (AllocationId: $ALLOC_ID)"
+
+    - name: Associate Elastic IP to Instance
+      id: associate-eip
+      run: |
+        aws ec2 associate-address \
+          --instance-id "${{ steps.launch-instance.outputs.INSTANCE_ID }}" \
+          --allocation-id "${{ steps.allocate-eip.outputs.ALLOCATION_ID }}" \
+          --query 'AssociationId' --output text
+
+    - name: Summarize Outputs
+      run: |
+        echo "Instance ID: ${{ steps.launch-instance.outputs.INSTANCE_ID }}"
+        echo "Elastic IP:  ${{ steps.allocate-eip.outputs.PUBLIC_IP }}"
+        echo "::notice title=Next step::Create an A-record so '${{ github.event.inputs.domain_name }}' points to ${{ steps.allocate-eip.outputs.PUBLIC_IP }}."

@@ -33,6 +33,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
   EC2_ROLE_NAME: EC2-CodeDeploy-Role
   CODEDEPLOY_ROLE_NAME: CodeDeploy-Service-Role
   SECURITY_GROUP_NAME: CodeDeploy-Security-Group
@@ -50,6 +51,28 @@ jobs:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
+
+    # Ensure default VPC and a default subnet exist
+    - name: Ensure default VPC and default subnet
+      id: ensure-default
+      run: |
+        set -e
+        DEFAULT_VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
+        if [ -z "$DEFAULT_VPC_ID" ] || [ "$DEFAULT_VPC_ID" = "None" ] || [ "$DEFAULT_VPC_ID" = "null" ]; then
+          DEFAULT_VPC_ID=$(aws ec2 create-default-vpc --query 'Vpc.VpcId' --output text)
+        fi
+
+        SUBNET_ID=$(aws ec2 describe-subnets \
+          --filters "Name=vpc-id,Values=$DEFAULT_VPC_ID" \
+          --query 'Subnets[?DefaultForAz==`true`][0].SubnetId' \
+          --output text 2>/dev/null || true)
+
+        if [ -z "$SUBNET_ID" ] || [ "$SUBNET_ID" = "None" ] || [ "$SUBNET_ID" = "null" ]; then
+          SUBNET_ID=$(aws ec2 create-default-subnet --availability-zone ${AWS_REGION}a --query 'Subnet.SubnetId' --output text)
+        fi
+
+        echo "DEFAULT_VPC_ID=$DEFAULT_VPC_ID" >> $GITHUB_OUTPUT
+        echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_OUTPUT
 
     # IAM Role for EC2
     - name: Create EC2 IAM Role and Instance Profile
@@ -94,9 +117,9 @@ jobs:
     - name: Create Security Group
       id: create-sg
       run: |
-        VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
+        VPC_ID="${{ steps.ensure-default.outputs.DEFAULT_VPC_ID }}"
         EXISTING_SG=$(aws ec2 describe-security-groups \
-          --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" \
+          --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" "Name=vpc-id,Values=$VPC_ID" \
           --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
         if [ "$EXISTING_SG" != "None" ] && [ "$EXISTING_SG" != "" ]; then
           echo "SECURITY_GROUP_ID=$EXISTING_SG" >> $GITHUB_OUTPUT
@@ -151,16 +174,16 @@ jobs:
         DOMAIN_NAME: ${{ github.event.inputs.domain_name }}
         EMAIL: ${{ github.event.inputs.email }}
       run: |
-        cat > user-data.sh << 'EOF'
+        cat > user-data.sh << EOF
         #!/bin/bash
 
-        # Set environment variables (persist for all shells)
+        # Persist environment variables
         echo 'export ENV_VAR1="val1"' | sudo tee -a /etc/profile
         echo 'export ENV_VAR2="val2"' | sudo tee -a /etc/profile
-        # Also set AWS_REGION for this session if not defined (and persist)
+        # Persist AWS_REGION for convenience (detect from instance metadata)
         if ! grep -q 'export AWS_REGION=' /etc/profile; then
-          REGION_DETECTED=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep region | awk -F\" '{print $4}')
-          echo "export AWS_REGION=\"$REGION_DETECTED\"" | sudo tee -a /etc/profile
+          REGION_DETECTED=\$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep region | awk -F\" '{print \$4}')
+          echo "export AWS_REGION=\"\$REGION_DETECTED\"" | sudo tee -a /etc/profile
         fi
         source /etc/profile
 
@@ -169,8 +192,8 @@ jobs:
 
         # CodeDeploy Agent (region-aware)
         cd /home/ubuntu
-        REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region)
-        wget "https://aws-codedeploy-${REGION}.s3.${REGION}.amazonaws.com/latest/install"
+        REGION=\$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region)
+        wget "https://aws-codedeploy-\${REGION}.s3.\${REGION}.amazonaws.com/latest/install"
         chmod +x ./install
         ./install auto
         sudo systemctl enable codedeploy-agent
@@ -203,10 +226,10 @@ jobs:
         GH_TOKEN="${GH_PAT}"
         REPO_NAME="your-repository"
         BRANCH="main"
-        sudo git clone -b "$BRANCH" "https://${GH_USER}:${GH_TOKEN}@github.com/${GH_USER}/${REPO_NAME}.git"
-        sudo chown -R ubuntu:ubuntu "$REPO_NAME"
+        sudo git clone -b "\$BRANCH" "https://\${GH_USER}:\${GH_TOKEN}@github.com/\${GH_USER}/\${REPO_NAME}.git"
+        sudo chown -R ubuntu:ubuntu "\$REPO_NAME"
 
-        cd "/home/ubuntu/${REPO_NAME}"
+        cd "/home/ubuntu/\${REPO_NAME}"
         npm install
 
         # PM2
@@ -258,6 +281,7 @@ jobs:
           --count 1 \
           --instance-type ${{ github.event.inputs.instance_type }} \
           --key-name ${{ steps.create-key.outputs.KEY_NAME }} \
+          --subnet-id ${{ steps.ensure-default.outputs.SUBNET_ID }} \
           --security-group-ids ${{ steps.create-sg.outputs.SECURITY_GROUP_ID }} \
           --iam-instance-profile Arn=${{ steps.ec2-role.outputs.PROFILE_ARN }} \
           --user-data file://user-data.sh \
@@ -266,16 +290,14 @@ jobs:
           --output text)
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
 
-        # Wait until running before associating EIP
         aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 
     # Allocate & associate Elastic IP
     - name: Allocate Elastic IP
       id: allocate-eip
       run: |
-        ALLOC_JSON=$(aws ec2 allocate-address --domain vpc)
-        ALLOC_ID=$(echo "$ALLOC_JSON" | jq -r .AllocationId)
-        PUBLIC_IP=$(echo "$ALLOC_JSON" | jq -r .PublicIp)
+        ALLOC_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
+        PUBLIC_IP=$(aws ec2 describe-addresses --allocation-ids "$ALLOC_ID" --query 'Addresses[0].PublicIp' --output text)
         echo "ALLOCATION_ID=$ALLOC_ID" >> $GITHUB_OUTPUT
         echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
         echo "Allocated Elastic IP: $PUBLIC_IP (AllocationId: $ALLOC_ID)"
@@ -283,10 +305,11 @@ jobs:
     - name: Associate Elastic IP to Instance
       id: associate-eip
       run: |
-        aws ec2 associate-address \
+        ASSOC_ID=$(aws ec2 associate-address \
           --instance-id "${{ steps.launch-instance.outputs.INSTANCE_ID }}" \
           --allocation-id "${{ steps.allocate-eip.outputs.ALLOCATION_ID }}" \
-          --query 'AssociationId' --output text
+          --query 'AssociationId' --output text)
+        echo "AssociationId: $ASSOC_ID"
 
     - name: Summarize Outputs
       run: |

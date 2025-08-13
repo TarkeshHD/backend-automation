@@ -51,7 +51,6 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # IAM Role for EC2
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role
       run: |
@@ -90,7 +89,6 @@ jobs:
         PROFILE_ARN=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Arn' --output text)
         echo "PROFILE_ARN=$PROFILE_ARN" >> $GITHUB_OUTPUT
 
-    # Security Group
     - name: Create Security Group
       id: create-sg
       run: |
@@ -112,7 +110,6 @@ jobs:
           echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
         fi
 
-    # Key Pair
     - name: Create EC2 Key Pair
       id: create-key
       run: |
@@ -131,7 +128,6 @@ jobs:
         name: ec2-private-key
         path: ${{ steps.create-key.outputs.KEY_NAME }}.pem
 
-    # Get Ubuntu AMI
     - name: Get Latest Ubuntu AMI
       id: get-ami
       run: |
@@ -142,7 +138,6 @@ jobs:
           --output text)
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
-    # Launch EC2 Instance with SSL
     - name: Launch EC2 Instance
       id: launch-instance
       env:
@@ -153,6 +148,12 @@ jobs:
       run: |
         cat > user-data.sh << 'EOF'
         #!/bin/bash
+
+        # Set environment variables
+        echo 'export ENV_VAR1="val1"' | sudo tee -a /etc/profile
+        echo 'export ENV_VAR2="val2"' | sudo tee -a /etc/profile
+        source /etc/profile
+
         sudo apt-get update -y
         sudo apt-get install -y ruby wget curl gnupg git nginx software-properties-common
 

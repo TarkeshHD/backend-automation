@@ -8,10 +8,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repository
       - uses: actions/checkout@v3
 
-      # ✅ Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -19,7 +17,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ Install eksctl and kubectl
       - name: Install eksctl and kubectl
         run: |
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
@@ -28,29 +25,21 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Create ECR repo if missing
       - name: Create ECR Repository if not exists
         run: |
           REPO_NAME="backend"
           if ! aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1; then
-            echo "Creating ECR repository: $REPO_NAME"
             aws ecr create-repository --repository-name $REPO_NAME
-          else
-            echo "ECR repository $REPO_NAME already exists."
           fi
 
-      # ✅ Build and push Docker image
       - name: Build and Push Backend Docker Image
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          echo "Building and pushing: $BACKEND_IMAGE:$TAG"
-
           docker build -f vrse-builder-backend-main/Dockerfile \
             -t "$BACKEND_IMAGE:$TAG" \
             -t "$BACKEND_IMAGE:latest" \
@@ -58,20 +47,12 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Ensure EKS cluster exists
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
           STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
-
-          echo "Checking EKS cluster..."
-          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "✅ Cluster exists: $CLUSTER_NAME"
-          elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "⚠️ Stack exists but cluster is missing. Manual check recommended."
-          else
-            echo "🚀 Creating cluster: $CLUSTER_NAME"
+          if ! aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
             eksctl create cluster \
               --name "$CLUSTER_NAME" \
               --region "$REGION" \
@@ -83,17 +64,12 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig
       - name: Generate kubeconfig
         run: |
-          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
-          REGION="${{ secrets.AWS_REGION }}"
-          echo "⌛ Waiting for cluster to become active..."
-          aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
-          echo "🔑 Updating kubeconfig..."
-          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
+          aws eks update-kubeconfig \
+            --name "${{ secrets.EKS_CLUSTER_NAME }}" \
+            --region "${{ secrets.AWS_REGION }}"
 
-      # ✅ Deploy MongoDB
       - name: Deploy MongoDB to EKS
         working-directory: vrse-builder-backend-main
         run: |
@@ -103,53 +79,28 @@ jobs:
           kubectl apply -f mongodb-poddisruptionbudget.yaml
           kubectl apply -f rbac-restrict-delete.yaml
 
-      # ✅ Deploy Backend
       - name: Deploy Backend to EKS
         working-directory: vrse-builder-backend-main
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          echo "Deploying backend: $BACKEND_IMAGE:$TAG"
           sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
-      # ✅ Verify Backend Rollout
       - name: Verify Backend Rollout
         run: |
-          echo "🕒 Waiting for backend deployment to be ready..."
           kubectl rollout status deployment/backend-deployment --timeout=600s
 
-      # ✅ Show Public IP of Backend
       - name: Get Backend Service Public IP
         run: |
           echo "🌐 Fetching backend service EXTERNAL-IP..."
           kubectl get svc backend-service -o wide
 
-      # 🧪 Check Backend Pod Status
-      - name: Check Backend Pod Status
+      - name: Test HTTP Response from /api/health
         run: |
-          echo "🧾 Checking pod status for backend..."
-          kubectl get pods -l app=backend -o wide
-
-      # 🧾 Show Backend Logs
-      - name: Show Backend Logs
-        run: |
-          echo "🧾 Fetching logs from backend pod..."
-          POD_NAME=$(kubectl get pods -l app=backend -o jsonpath="{.items[0].metadata.name}")
-          kubectl logs --tail=100 "$POD_NAME"
-
-      # 🔍 Describe Backend Service
-      - name: Describe Backend Service
-        run: |
-          echo "🔍 Describing backend service..."
-          kubectl describe svc backend-service
-
-      # 🌐 Test HTTP Response from Backend
-      - name: Test HTTP Response
-        run: |
-          echo "🌐 Testing HTTP response from backend service..."
+          echo "🌐 Testing backend /api/health endpoint..."
           ENDPOINT=$(kubectl get svc backend-service -o jsonpath="{.status.loadBalancer.ingress[0].hostname}")
-          echo "Endpoint: http://$ENDPOINT"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://$ENDPOINT")
+          echo "Endpoint: http://$ENDPOINT/api/health"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://$ENDPOINT/api/health")
           echo "HTTP Status Code: $STATUS"

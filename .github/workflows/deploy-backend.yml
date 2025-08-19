@@ -83,19 +83,15 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig (only if cluster is active)
+      # ✅ Generate kubeconfig
       - name: Generate kubeconfig
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
-
           echo "⌛ Waiting for cluster to be active..."
           aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
-
           echo "🔑 Updating kubeconfig..."
-          aws eks update-kubeconfig \
-            --name "$CLUSTER_NAME" \
-            --region "$REGION"
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
 
       # ✅ Deploy Backend and MongoDB
       - name: Deploy Backend and MongoDB
@@ -112,3 +108,45 @@ jobs:
       - name: Verify Deployment
         run: |
           kubectl rollout status deployment/backend-deployment
+
+      # ✅ Get Service External IP
+      - name: Get Backend Service External IP
+        id: get-service-ip
+        run: |
+          SERVICE_NAME="backend-service"
+          echo "Fetching external IP of service $SERVICE_NAME..."
+          IP=""
+          for i in {1..20}; do
+            IP=$(kubectl get svc $SERVICE_NAME -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$IP" ]; then
+              echo "Found service IP: $IP"
+              break
+            fi
+            echo "Waiting for LoadBalancer IP... ($i/20)"
+            sleep 10
+          done
+
+          if [ -z "$IP" ]; then
+            echo "❌ Failed to get external IP."
+            exit 1
+          fi
+
+          echo "SERVICE_URL=http://$IP" >> $GITHUB_ENV
+
+      # ✅ Check if Backend is Live
+      - name: Check if Backend is Live
+        run: |
+          echo "🔎 Checking backend health at $SERVICE_URL/health"
+          for i in {1..5}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Backend is up and running (HTTP 200)"
+              exit 0
+            else
+              echo "⚠️ Attempt $i: Backend not ready yet (status: $STATUS)"
+              sleep 5
+            fi
+          done
+
+          echo "❌ Backend did not become healthy in time."
+          exit 1

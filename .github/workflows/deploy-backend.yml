@@ -114,8 +114,14 @@ jobs:
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
-      # ✅ Verify Deployment Rollout
+      # ✅ Verify Backend Rollout
       - name: Verify Backend Rollout
         run: |
           echo "🕒 Waiting for backend deployment to be ready..."
           kubectl rollout status deployment/backend-deployment --timeout=600s
+
+      # ✅ Show Public IP of Backend
+      - name: Get Backend Service Public IP
+        run: |
+          echo "🌐 Fetching backend service EXTERNAL-IP..."
+          kubectl get svc backend-service -o wide

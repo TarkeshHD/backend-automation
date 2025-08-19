@@ -125,3 +125,31 @@ jobs:
         run: |
           echo "🌐 Fetching backend service EXTERNAL-IP..."
           kubectl get svc backend-service -o wide
+
+      # 🧪 Check Backend Pod Status
+      - name: Check Backend Pod Status
+        run: |
+          echo "🧾 Checking pod status for backend..."
+          kubectl get pods -l app=backend -o wide
+
+      # 🧾 Show Backend Logs
+      - name: Show Backend Logs
+        run: |
+          echo "🧾 Fetching logs from backend pod..."
+          POD_NAME=$(kubectl get pods -l app=backend -o jsonpath="{.items[0].metadata.name}")
+          kubectl logs --tail=100 "$POD_NAME"
+
+      # 🔍 Describe Backend Service
+      - name: Describe Backend Service
+        run: |
+          echo "🔍 Describing backend service..."
+          kubectl describe svc backend-service
+
+      # 🌐 Test HTTP Response from Backend
+      - name: Test HTTP Response
+        run: |
+          echo "🌐 Testing HTTP response from backend service..."
+          ENDPOINT=$(kubectl get svc backend-service -o jsonpath="{.status.loadBalancer.ingress[0].hostname}")
+          echo "Endpoint: http://$ENDPOINT"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://$ENDPOINT")
+          echo "HTTP Status Code: $STATUS"

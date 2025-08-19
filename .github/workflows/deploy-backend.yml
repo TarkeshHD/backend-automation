@@ -1,212 +1,114 @@
-name: Deploy Backend and MongoDB to EKS
- 
+name: Deploy Backend to EKS
+
 on:
-
   workflow_dispatch:
- 
+
 jobs:
-
   deploy-backend:
-
     runs-on: ubuntu-latest
- 
+
     steps:
-
       # ✅ Checkout repository
-
       - uses: actions/checkout@v3
- 
-      # ✅ Configure AWS credentials
 
+      # ✅ Setup AWS Credentials
       - name: Configure AWS credentials
-
         uses: aws-actions/configure-aws-credentials@v2
-
         with:
-
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
           aws-region: ${{ secrets.AWS_REGION }}
- 
+
       # ✅ Install eksctl and kubectl
-
       - name: Install eksctl and kubectl
-
         run: |
-
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-
           sudo mv /tmp/eksctl /usr/local/bin
-
           curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
-
           chmod +x kubectl
-
           sudo mv kubectl /usr/local/bin/
- 
+
       # ✅ Login to Amazon ECR
-
       - name: Login to Amazon ECR
-
         id: login-ecr
-
         uses: aws-actions/amazon-ecr-login@v2
- 
-      # ✅ Create ECR repo if missing
 
+      # ✅ Auto-create ECR repo if not exists
       - name: Create ECR Repository if not exists
-
         run: |
-
           REPO_NAME="backend"
-
           if ! aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1; then
-
             echo "Creating ECR repository: $REPO_NAME"
-
             aws ecr create-repository --repository-name $REPO_NAME
-
           else
-
             echo "ECR repository $REPO_NAME already exists."
-
           fi
- 
-      # ✅ Build and push Docker image
 
-      - name: Build and Push Backend Docker Image
-
+      # ✅ Build and Push Backend Docker image
+      - name: Build and Push Backend Docker image
         run: |
-
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
-
           TAG="${GITHUB_SHA::7}"
+          echo "Building backend image: $BACKEND_IMAGE:$TAG"
 
-          echo "Building and pushing: $BACKEND_IMAGE:$TAG"
- 
           docker build -f vrse-builder-backend-main/Dockerfile \
-
             -t "$BACKEND_IMAGE:$TAG" \
-
             -t "$BACKEND_IMAGE:latest" \
-
             ./vrse-builder-backend-main
-
           docker push "$BACKEND_IMAGE:$TAG"
-
           docker push "$BACKEND_IMAGE:latest"
- 
-      # ✅ Ensure EKS cluster exists
 
+      # ✅ Ensure EKS Cluster exists or create it
       - name: Ensure EKS Cluster
-
         run: |
-
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
-
           REGION="${{ secrets.AWS_REGION }}"
-
           STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
- 
-          echo "Checking EKS cluster..."
 
+          echo "🔍 Checking EKS cluster..."
           if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
-
-            echo "✅ Cluster exists: $CLUSTER_NAME"
-
+            echo "✅ Cluster $CLUSTER_NAME exists."
           elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-
-            echo "⚠️ Stack exists but cluster is missing. Manual check recommended."
-
+            echo "⚠️ Stack $STACK_NAME exists. Skipping creation."
           else
-
-            echo "🚀 Creating cluster: $CLUSTER_NAME"
-
+            echo "🚀 Creating new EKS cluster: $CLUSTER_NAME..."
             eksctl create cluster \
-
               --name "$CLUSTER_NAME" \
-
               --region "$REGION" \
-
               --nodegroup-name standard-workers \
-
               --node-type t3.medium \
-
               --nodes 2 \
-
               --nodes-min 1 \
-
               --nodes-max 3 \
-
               --managed
-
           fi
- 
-      # ✅ Generate kubeconfig
 
+      # ✅ Generate kubeconfig (only if cluster is active)
       - name: Generate kubeconfig
-
         run: |
-
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
-
           REGION="${{ secrets.AWS_REGION }}"
 
-          echo "⌛ Waiting for cluster to become active..."
-
+          echo "⌛ Waiting for cluster to be active..."
           aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
 
           echo "🔑 Updating kubeconfig..."
+          aws eks update-kubeconfig \
+            --name "$CLUSTER_NAME" \
+            --region "$REGION"
 
-          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
- 
-      # ✅ Deploy MongoDB
-
-      - name: Deploy MongoDB to EKS
-
-        working-directory: vrse-builder-backend-main
-
+      # ✅ Deploy Backend and MongoDB
+      - name: Deploy Backend and MongoDB
         run: |
-
-          kubectl apply -f mongodb-pvc.yaml
-
-          kubectl apply -f mongodb-deployment.yaml
-
-          kubectl apply -f mongodb-service.yaml
-
-          kubectl apply -f mongodb-poddisruptionbudget.yaml
-
-          kubectl apply -f rbac-restrict-delete.yaml
- 
-      # ✅ Deploy Backend
-
-      - name: Deploy Backend to EKS
-
-        working-directory: vrse-builder-backend-main
-
-        run: |
-
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
-
           TAG="${GITHUB_SHA::7}"
+          echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
 
-          echo "Deploying backend: $BACKEND_IMAGE:$TAG"
+          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-service.yaml
 
-          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
-
-          kubectl apply -f backend-deployment.yaml
-
-          kubectl apply -f backend-service.yaml
- 
-      # ✅ Verify Deployment Rollout
-
-      - name: Verify Backend Rollout
-
+      # ✅ Verify rollout
+      - name: Verify Deployment
         run: |
-
-          echo "🕒 Waiting for backend deployment to be ready..."
-
-          kubectl rollout status deployment/backend-deployment --timeout=600s
- 
+          kubectl rollout status deployment/backend-deployment

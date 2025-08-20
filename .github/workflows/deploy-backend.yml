@@ -25,9 +25,9 @@ jobs:
 
       - name: Deploy backend manifests
         run: |
-          kubectl apply -f backend-deployment.yaml
-          kubectl apply -f backend-service.yml
-          kubectl apply -f backend-ingress.yml
+          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-service.yml
+          kubectl apply -f vrse-builder-backend-main/backend-ingress.yml
 
       # ✅ Wait for DNS propagation
       - name: Wait for DNS propagation

@@ -1,11 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: backend-deployment
-  labels:
-    app: backend
+  name: backend
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: backend
@@ -15,48 +13,15 @@ spec:
         app: backend
     spec:
       containers:
-        # ✅ Backend Container
-        - name: backend-container
-          image: tarkesh/backend:latest
+        - name: backend
+          image: <your-backend-image>
           ports:
             - containerPort: 5000
-          env:
-            - name: NODE_ENV
-              value: "production"
-            - name: MONGODB_USER
-              value: "admin"
-            - name: MONGODB_PASSWORD
-              value: "admin"
-            - name: MONGODB_HOST
-              value: "mongodb-service"
-            - name: MONGODB_PORT
-              value: "27017"
-            - name: MONGODB_DB_NAME
-              value: "vrseBuilder"
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "250m"
-            limits:
-              memory: "512Mi"
-              cpu: "500m"
-
-
-
-
----
-# ✅ Service for Backend
-apiVersion: v1
-kind: Service
-metadata:
-  name: backend-service
-spec:
-  selector:
-    app: backend
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: 5000
-  type: LoadBalancer
-
-
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/configuration.json
+              subPath: configuration.json
+      volumes:
+        - name: config-volume
+          configMap:
+            name: backend-config

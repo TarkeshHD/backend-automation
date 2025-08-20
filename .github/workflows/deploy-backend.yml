@@ -3,51 +3,65 @@ name: Deploy Backend to EKS
 on:
   push:
     branches:
-      - main  # Or your deployment branch
+      - main
+
+env:
+  EKS_CLUSTER_NAME: Backend-cluster
+  AWS_REGION: us-east-1
+  BACKEND_DOMAIN: poc-api.autovrse.app
 
 jobs:
   deploy:
-    name: Deploy Backend
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Repo
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Install kubectl
-      uses: azure/setup-kubectl@v3
-      with:
-        version: 'latest'
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
 
-    - name: Update kubeconfig
-      run: aws eks update-kubeconfig --region us-east-1 --name Backend-cluster
+      - name: Setup kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
-    - name: Apply aws-auth ConfigMap (optional step to add local user)
-      run: |
-        cat <<EOF > aws-auth-patch.yaml
-        apiVersion: v1
-        kind: ConfigMap
-        metadata:
-          name: aws-auth
-          namespace: kube-system
-        data:
-          mapUsers: |
-            - userarn: arn:aws:iam::133354030153:user/amplify-dev
-              username: admin
-              groups:
-                - system:masters
-        EOF
+      - name: Create or Update ConfigMap
+        run: |
+          kubectl delete configmap backend-config --ignore-not-found
+          kubectl create configmap backend-config --from-file=configuration.json
 
-        kubectl apply -f aws-auth-patch.yaml --validate=false
+      - name: Apply Deployment
+        run: kubectl apply -f backend-deployment.yml
 
-    - name: Deploy Backend
-      run: |
-        kubectl apply -f k8s/backend-deployment.yaml
-        kubectl apply -f k8s/backend-service.yaml
+      - name: Apply Service
+        run: kubectl apply -f backend-service.yml
+
+      - name: Apply Ingress (DNS + TLS)
+        run: kubectl apply -f backend-ingress.yml
+
+      - name: Wait for Load Balancer IP
+        id: wait_lb
+        run: |
+          for i in {1..30}; do
+            LB_HOST=$(kubectl get ingress backend-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            if [ ! -z "$LB_HOST" ]; then
+              echo "Load Balancer Host: $LB_HOST"
+              echo "LB_HOST=$LB_HOST" >> $GITHUB_ENV
+              break
+            fi
+            echo "Waiting for LoadBalancer IP..."
+            sleep 10
+          done
+
+      - name: Output Backend URL
+        run: |
+          echo "✅ Backend is available at: https://${{ env.BACKEND_DOMAIN }}"

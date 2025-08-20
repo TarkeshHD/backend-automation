@@ -1,105 +1,121 @@
-name: 🚀 Backend Deploy to EKS
+name: 🚀 Deploy Backend to AWS EKS
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
 
 env:
   AWS_REGION: us-east-1
   CLUSTER_NAME: Backend-cluster
+  DOMAIN_NAME: poc-api.autovrse.app
   BACKEND_NAME: backend
   BACKEND_DIR: vrse-builder-backend-main
-  DOMAIN_NAME: poc-api.autovrse.app
-  IMAGE: <your-aws-account-id>.dkr.ecr.us-east-1.amazonaws.com/backend:<your-tag>
+  IMAGE: 133354030153.dkr.ecr.us-east-1.amazonaws.com/backend
 
 jobs:
   deploy:
-    name: 🌐 Deploy Backend to EKS
     runs-on: ubuntu-latest
 
     steps:
-    - name: 📥 Checkout repo
-      uses: actions/checkout@v3
+      - name: 🧾 Checkout Code
+        uses: actions/checkout@v3
 
-    - name: ☁️ Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: 🛠️ Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: ☸️ Update kubeconfig
-      run: aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+      - name: 🎯 Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: v1.30.0
 
-    - name: 🔄 Clean old ingress-nginx (if conflicting)
-      run: |
-        if kubectl get ns ingress-nginx; then
-          echo "⚠️ Deleting existing ingress-nginx namespace to fix Helm conflicts"
-          kubectl delete ns ingress-nginx --ignore-not-found
-          sleep 20
-        fi
+      - name: 🎯 Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: v3.13.3
 
-    - name: ☁️ Install ingress-nginx via Helm
-      run: |
-        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-        helm repo update
-        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-          --namespace ingress-nginx --create-namespace
+      - name: 🔌 Update Kubeconfig
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
 
-    - name: 📩 Install cert-manager
-      run: |
-        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-        echo "✅ Waiting for cert-manager to be ready..."
-        kubectl wait --namespace cert-manager --for=condition=Available --timeout=120s deployment/cert-manager
+      # 1. Install Ingress Controller
+      - name: 🌐 Install NGINX Ingress
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx \
+            --create-namespace \
+            --set controller.publishService.enabled=true
 
-    - name: 🧾 Create ClusterIssuer
-      run: |
-        cat <<EOF | kubectl apply -f -
-        apiVersion: cert-manager.io/v1
-        kind: ClusterIssuer
-        metadata:
-          name: letsencrypt-prod
-        spec:
-          acme:
-            server: https://acme-v02.api.letsencrypt.org/directory
-            email: your-email@example.com
-            privateKeySecretRef:
-              name: letsencrypt-prod
-            solvers:
-            - http01:
-                ingress:
-                  class: nginx
-        EOF
+      # 2. Install cert-manager
+      - name: 🔒 Install cert-manager
+        run: |
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm upgrade --install cert-manager jetstack/cert-manager \
+            --namespace cert-manager \
+            --create-namespace \
+            --set installCRDs=true
 
-    - name: 🚢 Deploy Backend App
-      run: |
-        kubectl apply -f $BACKEND_DIR/k8s-deployment.yaml
+      # 3. Create ClusterIssuer (TLS)
+      - name: 📄 Create ClusterIssuer
+        run: |
+          cat <<EOF > cluster-issuer.yaml
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: letsencrypt-prod
+          spec:
+            acme:
+              server: https://acme-v02.api.letsencrypt.org/directory
+              email: your-email@example.com
+              privateKeySecretRef:
+                name: letsencrypt-prod
+              solvers:
+                - http01:
+                    ingress:
+                      class: nginx
+          EOF
+          kubectl apply -f cluster-issuer.yaml
 
-    - name: 🌐 Deploy Ingress for backend
-      run: |
-        cat <<EOF | kubectl apply -f -
-        apiVersion: networking.k8s.io/v1
-        kind: Ingress
-        metadata:
-          name: backend-ingress
-          namespace: default
-          annotations:
-            kubernetes.io/ingress.class: "nginx"
-            cert-manager.io/cluster-issuer: "letsencrypt-prod"
-        spec:
-          tls:
-          - hosts:
-            - ${DOMAIN_NAME}
-            secretName: backend-tls
-          rules:
-          - host: ${DOMAIN_NAME}
-            http:
-              paths:
-              - path: /
-                pathType: Prefix
-                backend:
-                  service:
-                    name: ${BACKEND_NAME}
-                    port:
-                      number: 80
-        EOF
+      # 4. Deploy Backend
+      - name: 🚀 Deploy Backend Workloads
+        run: |
+          kubectl apply -f $BACKEND_DIR/deployment.yaml
+          kubectl apply -f $BACKEND_DIR/service.yaml
+
+      # 5. Create Ingress with TLS
+      - name: 🌍 Create Ingress for Backend
+        run: |
+          cat <<EOF > backend-ingress.yaml
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: backend-ingress
+            namespace: default
+            annotations:
+              kubernetes.io/ingress.class: nginx
+              cert-manager.io/cluster-issuer: letsencrypt-prod
+              nginx.ingress.kubernetes.io/ssl-redirect: "true"
+          spec:
+            tls:
+              - hosts:
+                  - $DOMAIN_NAME
+                secretName: backend-tls
+            rules:
+              - host: $DOMAIN_NAME
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: $BACKEND_NAME
+                          port:
+                            number: 80
+          EOF
+          kubectl apply -f backend-ingress.yaml

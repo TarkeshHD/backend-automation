@@ -7,118 +7,169 @@ jobs:
   deploy-backend:
     runs-on: ubuntu-latest
 
+    env:
+      BACKEND_NAME: backend
+      BACKEND_DIR: vrse-builder-backend-main
+      CLUSTER_NAME: Backend-cluster
+      DOMAIN_NAME: poc-api.autovrse.app
+
     steps:
-      - name: Checkout repository
+      - name: 📁 Checkout repo
         uses: actions/checkout@v3
 
-      - name: Configure AWS credentials
+      - name: 🔐 Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Install eksctl and kubectl
+      - name: 🧰 Install eksctl, kubectl, and Helm
         run: |
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin
+
           curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      - name: Login to Amazon ECR
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: 🔄 Ensure EKS Cluster
+        run: |
+          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "${{ secrets.AWS_REGION }}" >/dev/null 2>&1; then
+            echo "✅ EKS Cluster $CLUSTER_NAME exists."
+          else
+            echo "❌ Cluster does not exist. Exiting."
+            exit 1
+          fi
+
+      - name: 📡 Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region "${{ secrets.AWS_REGION }}" --name "$CLUSTER_NAME"
+
+      - name: 📦 Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Create ECR Repository if not exists
+      - name: 🏗️ Build and push backend Docker image
         run: |
-          REPO_NAME="backend"
-          if ! aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1; then
-            aws ecr create-repository --repository-name $REPO_NAME
-          fi
-
-      - name: Build and Push Backend Docker image
-        run: |
-          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
+          IMAGE="${{ steps.login-ecr.outputs.registry }}/$BACKEND_NAME"
           TAG="${GITHUB_SHA::7}"
 
-          docker build -f vrse-builder-backend-main/Dockerfile \
-            -t "$BACKEND_IMAGE:$TAG" \
-            -t "$BACKEND_IMAGE:latest" \
-            ./vrse-builder-backend-main
+          docker build -t $IMAGE:$TAG -t $IMAGE:latest -f $BACKEND_DIR/Dockerfile $BACKEND_DIR
+          docker push $IMAGE:$TAG
+          docker push $IMAGE:latest
 
-          docker push "$BACKEND_IMAGE:$TAG"
-          docker push "$BACKEND_IMAGE:latest"
+          echo "IMAGE=$IMAGE:$TAG" >> $GITHUB_ENV
 
-      - name: Ensure EKS Cluster Exists
+      - name: 🧾 Replace image in deployment
         run: |
-          CLUSTER_NAME="Backend-cluster"
-          REGION="${{ secrets.AWS_REGION }}"
-          STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
+          sed -i "s|image:.*|image: $IMAGE|" $BACKEND_DIR/backend-deployment.yaml
 
-          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "✅ Cluster $CLUSTER_NAME exists."
-          elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "⚠️ Stack $STACK_NAME exists. Skipping creation."
-          else
-            eksctl create cluster \
-              --name "$CLUSTER_NAME" \
-              --region "$REGION" \
-              --nodegroup-name standard-workers \
-              --node-type t3.medium \
-              --nodes 2 \
-              --nodes-min 1 \
-              --nodes-max 3 \
-              --managed
-          fi
-
-
-        # ✅ Wait for External IP and display it
-      - name: Wait for External IP (Ingress-NGINX)
-        id: wait-for-ip
+      - name: 🚀 Apply K8s manifests (deployment + service)
         run: |
-          echo "🔄 Waiting for External IP from ingress-nginx-controller service..."
+          kubectl apply -f $BACKEND_DIR/backend-deployment.yaml
+          kubectl apply -f $BACKEND_DIR/backend-service.yaml
+
+      - name: ☁️ Deploy Ingress Controller (if not exists)
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx --create-namespace
+
+      - name: 📥 Wait for Ingress External IP
+        id: wait-ip
+        run: |
           for i in {1..30}; do
             EXTERNAL_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
             if [[ -z "$EXTERNAL_IP" ]]; then
-              echo "Attempt $i: No external IP yet. Retrying in 10s..."
+              echo "Attempt $i: Waiting for external IP..."
               sleep 10
             else
-              echo "✅ External IP found: $EXTERNAL_IP"
-              echo "::set-output name=external_ip::$EXTERNAL_IP"
+              echo "✅ External IP: $EXTERNAL_IP"
+              echo "external_ip=$EXTERNAL_IP" >> $GITHUB_OUTPUT
               break
             fi
           done
 
-          if [[ -z "$EXTERNAL_IP" ]]; then
-            echo "❌ Failed to get External IP after waiting."
-            exit 1
-          fi
-
-      - name: Show External IP in next step
+      - name: 📌 Show DNS setup info for Squarespace
         run: |
-          echo "🌐 External IP or Hostname: ${{ steps.wait-for-ip.outputs.external_ip }}"
+          echo "🔗 Please add a CNAME record in Squarespace:"
+          echo "Host: poc-api.autovrse.app"
+          echo "Type: CNAME"
+          echo "Value: ${{ steps.wait-ip.outputs.external_ip }}"
 
-
-      - name: Update kubeconfig
+      - name: 🔐 Install Cert Manager
         run: |
-          aws eks update-kubeconfig --name Backend-cluster --region ${{ secrets.AWS_REGION }}
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
 
-      - name: Deploy Backend & MongoDB
+      - name: 📜 Create ClusterIssuer
         run: |
-          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
-          TAG="${GITHUB_SHA::7}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: letsencrypt-prod
+          spec:
+            acme:
+              server: https://acme-v02.api.letsencrypt.org/directory
+              email: your-email@example.com
+              privateKeySecretRef:
+                name: letsencrypt-prod
+              solvers:
+              - http01:
+                  ingress:
+                    class: nginx
+          EOF
 
-          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
-          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
-          kubectl apply -f vrse-builder-backend-main/backend-service.yaml
-
-      - name: Apply Ingress and TLS (cert-manager)
+      - name: 🔐 Create TLS Certificate
         run: |
-          kubectl apply -f vrse-builder-backend-main/cluster-issuer.yaml
-          kubectl apply -f vrse-builder-backend-main/cert-backend.yaml
-          kubectl apply -f vrse-builder-backend-main/backend-ingress.yaml
+          cat <<EOF | kubectl apply -f -
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: backend-cert
+            namespace: default
+          spec:
+            secretName: backend-tls
+            issuerRef:
+              name: letsencrypt-prod
+              kind: ClusterIssuer
+            commonName: $DOMAIN_NAME
+            dnsNames:
+              - $DOMAIN_NAME
+          EOF
 
-      - name: Verify Backend Deployment
+      - name: 🌐 Create Ingress
         run: |
-          kubectl rollout status deployment/backend-deployment
+          cat <<EOF | kubectl apply -f -
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: backend-ingress
+            annotations:
+              kubernetes.io/ingress.class: nginx
+              cert-manager.io/cluster-issuer: letsencrypt-prod
+          spec:
+            tls:
+              - hosts:
+                  - $DOMAIN_NAME
+                secretName: backend-tls
+            rules:
+              - host: $DOMAIN_NAME
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: backend-service
+                          port:
+                            number: 80
+          EOF
+
+      - name: ✅ Final Check
+        run: |
+          echo "✅ Your backend should be accessible soon at https://$DOMAIN_NAME"

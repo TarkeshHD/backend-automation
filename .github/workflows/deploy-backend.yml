@@ -1,129 +1,82 @@
 name: Deploy Backend to EKS
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
-  deploy-backend:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repository
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      # ✅ Setup AWS Credentials
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: us-east-1
 
-      # ✅ Install eksctl and kubectl
-      - name: Install eksctl and kubectl
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name Backend-cluster --region us-east-1
+
+      - name: Deploy backend manifests
         run: |
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
+          kubectl apply -f backend-deployment.yaml
+          kubectl apply -f backend-service.yml
+          kubectl apply -f backend-ingress.yml
 
-      # ✅ Login to Amazon ECR
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # ✅ Auto-create ECR repo if not exists
-      - name: Create ECR Repository if not exists
+      # ✅ Wait for DNS propagation (check if domain resolves)
+      - name: Wait for DNS propagation
         run: |
-          REPO_NAME="backend"
-          if ! aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1; then
-            echo "Creating ECR repository: $REPO_NAME"
-            aws ecr create-repository --repository-name $REPO_NAME
-          else
-            echo "ECR repository $REPO_NAME already exists."
-          fi
-
-      # ✅ Build and Push Backend Docker image
-      - name: Build and Push Backend Docker image
-        run: |
-          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
-          TAG="${GITHUB_SHA::7}"
-          echo "Building backend image: $BACKEND_IMAGE:$TAG"
-
-          docker build -f vrse-builder-backend-main/Dockerfile \
-            -t "$BACKEND_IMAGE:$TAG" \
-            -t "$BACKEND_IMAGE:latest" \
-            ./vrse-builder-backend-main
-          docker push "$BACKEND_IMAGE:$TAG"
-          docker push "$BACKEND_IMAGE:latest"
-
-      # ✅ Ensure EKS Cluster exists (if not, create)
-      - name: Ensure EKS Cluster
-        run: |
-          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
-          REGION="${{ secrets.AWS_REGION }}"
-          STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
-
-          echo "🔍 Checking EKS cluster..."
-          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "✅ Cluster $CLUSTER_NAME exists."
-          elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "⚠️ Stack $STACK_NAME exists. Skipping creation."
-          else
-            echo "🚀 Creating new EKS cluster: $CLUSTER_NAME..."
-            eksctl create cluster \
-              --name "$CLUSTER_NAME" \
-              --region "$REGION" \
-              --nodegroup-name standard-workers \
-              --node-type t3.medium \
-              --nodes 2 \
-              --nodes-min 1 \
-              --nodes-max 3 \
-              --managed
-          fi
-
-      # ✅ Generate kubeconfig
-      - name: Generate kubeconfig
-        run: |
-          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
-          REGION="${{ secrets.AWS_REGION }}"
-          echo "⌛ Waiting for cluster to be active..."
-          aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
-          echo "🔑 Updating kubeconfig..."
-          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
-
-      # ✅ Deploy Backend (Deployment + Service)
-      - name: Deploy Backend
-        run: |
-          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
-          TAG="${GITHUB_SHA::7}"
-          echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
-
-          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
-          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
-          kubectl apply -f vrse-builder-backend-main/backend-service.yaml
-
-      # ✅ Deploy Backend Ingress
-      - name: Deploy Backend Ingress
-        run: |
-          kubectl apply -f vrse-builder-backend-main/backend-ingress.yaml
-
-      # ✅ Verify rollout
-      - name: Verify Deployment
-        run: |
-          kubectl rollout status deployment/backend-deployment
-
-      # ✅ Wait for certificate
-      - name: Wait for Certificate
-        run: |
+          DOMAIN="backend.example.com"
+          echo "Waiting for DNS to propagate for $DOMAIN ..."
           for i in {1..30}; do
-            STATUS=$(kubectl get certificate backend-tls -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
-            if [ "$STATUS" == "True" ]; then echo "✅ Backend Cert Ready"; break; fi
-            echo "⏳ Waiting for backend cert..."; sleep 10
+            if nslookup $DOMAIN 8.8.8.8; then
+              echo "DNS resolved!"
+              break
+            fi
+            echo "Still waiting..."
+            sleep 20
           done
 
-      # ✅ Output Backend URL
-      - name: Output Backend URL
+      # ✅ Install cert-manager
+      - name: Install cert-manager
         run: |
-          echo "✅ Backend API available at: https://poc-api.autovrse.app"
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.0/cert-manager.crds.yaml
+          kubectl create namespace cert-manager || true
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm upgrade --install cert-manager jetstack/cert-manager \
+            --namespace cert-manager \
+            --version v1.15.0
+
+      # ✅ Wait until certificate becomes ready
+      - name: Wait for certificate readiness
+        run: |
+          CERT_NAME="backend-cert"
+          NAMESPACE="default"
+          echo "Waiting for certificate $CERT_NAME in $NAMESPACE ..."
+          for i in {1..30}; do
+            STATUS=$(kubectl get certificate $CERT_NAME -n $NAMESPACE -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
+            if [ "$STATUS" == "True" ]; then
+              echo "✅ Certificate is ready!"
+              break
+            fi
+            echo "Certificate not ready yet..."
+            sleep 20
+          done
+
+      # ✅ Output backend URL
+      - name: Get Backend URL
+        id: geturl
+        run: |
+          DOMAIN="backend.example.com"
+          echo "Backend URL: https://$DOMAIN"
+          echo "backend_url=https://$DOMAIN" >> $GITHUB_OUTPUT
+
+      - name: Print Backend URL
+        run: echo "✅ Your backend is live at ${{ steps.geturl.outputs.backend_url }}"

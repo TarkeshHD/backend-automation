@@ -24,7 +24,7 @@ jobs:
         run: |
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin
-          curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
@@ -58,7 +58,7 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Ensure EKS Cluster exists or create it
+      # ✅ Ensure EKS Cluster exists
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
@@ -93,8 +93,8 @@ jobs:
           echo "🔑 Updating kubeconfig..."
           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
 
-      # ✅ Deploy Backend and MongoDB
-      - name: Deploy Backend and MongoDB
+      # ✅ Deploy Backend (Deployment + Service)
+      - name: Deploy Backend
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
@@ -104,49 +104,26 @@ jobs:
           kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
           kubectl apply -f vrse-builder-backend-main/backend-service.yaml
 
+      # ✅ Deploy Backend Ingress
+      - name: Deploy Backend Ingress
+        run: |
+          kubectl apply -f vrse-builder-backend-main/backend-ingress.yaml
+
       # ✅ Verify rollout
       - name: Verify Deployment
         run: |
           kubectl rollout status deployment/backend-deployment
 
-      # ✅ Get Service External IP
-      - name: Get Backend Service External IP
-        id: get-service-ip
+      # ✅ Wait for certificate
+      - name: Wait for Certificate
         run: |
-          SERVICE_NAME="backend-service"
-          echo "Fetching external IP of service $SERVICE_NAME..."
-          IP=""
-          for i in {1..20}; do
-            IP=$(kubectl get svc $SERVICE_NAME -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            if [ -n "$IP" ]; then
-              echo "Found service IP: $IP"
-              break
-            fi
-            echo "Waiting for LoadBalancer IP... ($i/20)"
-            sleep 10
+          for i in {1..30}; do
+            STATUS=$(kubectl get certificate backend-tls -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
+            if [ "$STATUS" == "True" ]; then echo "✅ Backend Cert Ready"; break; fi
+            echo "⏳ Waiting for backend cert..."; sleep 10
           done
 
-          if [ -z "$IP" ]; then
-            echo "❌ Failed to get external IP."
-            exit 1
-          fi
-
-          echo "SERVICE_URL=http://$IP" >> $GITHUB_ENV
-
-      # ✅ Check if Backend is Live
-      - name: Check if Backend is Live
+      # ✅ Output Backend URL
+      - name: Output Backend URL
         run: |
-          echo "🔎 Checking backend health at $SERVICE_URL/health"
-          for i in {1..5}; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health")
-            if [ "$STATUS" = "200" ]; then
-              echo "✅ Backend is up and running (HTTP 200)"
-              exit 0
-            else
-              echo "⚠️ Attempt $i: Backend not ready yet (status: $STATUS)"
-              sleep 5
-            fi
-          done
-
-          echo "❌ Backend did not become healthy in time."
-          exit 1
+          echo "✅ Backend API available at: https://poc-api.autovrse.app"

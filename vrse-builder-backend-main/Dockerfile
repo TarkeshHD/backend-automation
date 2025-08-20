@@ -1,23 +1,23 @@
-# Use Node 20 Alpine base image
+# Use official Node.js LTS Alpine base image
 FROM node:20-alpine
 
 # Set working directory
 WORKDIR /app
 
-# Copy only package files to install dependencies first
+# Copy package files first to install dependencies
 COPY package*.json ./
 
-# Install production dependencies
-RUN npm install --only=production
-
-# Copy the rest of the application
-COPY . .
+# Install only production dependencies
+RUN npm ci --only=production
 
 # Install PM2 globally
 RUN npm install -g pm2
 
-# Expose port 5000
+# Copy rest of the application
+COPY . .
+
+# Expose the port the app runs on
 EXPOSE 5000
 
-# Start the app using PM2
+# Start the app using PM2 runtime
 CMD ["pm2-runtime", "server.js"]

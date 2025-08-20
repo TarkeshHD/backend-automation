@@ -1,12 +1,17 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: backend-service
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
 spec:
+  type: LoadBalancer
   selector:
-    app: backend
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/component: controller
   ports:
-    - protocol: TCP
+    - name: http
       port: 80
-      targetPort: 5000
-  type: ClusterIP   # ✅ Change from LoadBalancer → ClusterIP
+      targetPort: http
+    - name: https
+      port: 443
+      targetPort: https

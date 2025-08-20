@@ -29,17 +29,17 @@ jobs:
           kubectl apply -f backend-service.yml
           kubectl apply -f backend-ingress.yml
 
-      # ✅ Wait for DNS propagation (check if domain resolves)
+      # ✅ Wait for DNS propagation
       - name: Wait for DNS propagation
         run: |
           DOMAIN="backend.example.com"
           echo "Waiting for DNS to propagate for $DOMAIN ..."
           for i in {1..30}; do
             if nslookup $DOMAIN 8.8.8.8; then
-              echo "DNS resolved!"
+              echo "✅ DNS resolved!"
               break
             fi
-            echo "Still waiting..."
+            echo "⏳ Still waiting..."
             sleep 20
           done
 
@@ -54,10 +54,50 @@ jobs:
             --namespace cert-manager \
             --version v1.15.0
 
+      # ✅ Create ClusterIssuer for Let's Encrypt
+      - name: Create ClusterIssuer
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: letsencrypt-prod
+          spec:
+            acme:
+              server: https://acme-v02.api.letsencrypt.org/directory
+              email: your-email@example.com
+              privateKeySecretRef:
+                name: letsencrypt-prod
+              solvers:
+              - http01:
+                  ingress:
+                    class: nginx
+          EOF
+
+      # ✅ Create Certificate for backend
+      - name: Create Certificate
+        run: |
+          DOMAIN="backend.example.com"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: backend-cert
+            namespace: default
+          spec:
+            secretName: backend-cert-tls
+            issuerRef:
+              name: letsencrypt-prod
+              kind: ClusterIssuer
+            commonName: $DOMAIN
+            dnsNames:
+              - $DOMAIN
+          EOF
+
       # ✅ Wait until certificate becomes ready
       - name: Wait for certificate readiness
         run: |
-          CERT_NAME="backend-cert"
+          CERT_NAME="backend-tls"
           NAMESPACE="default"
           echo "Waiting for certificate $CERT_NAME in $NAMESPACE ..."
           for i in {1..30}; do
@@ -66,7 +106,7 @@ jobs:
               echo "✅ Certificate is ready!"
               break
             fi
-            echo "Certificate not ready yet..."
+            echo "⏳ Certificate not ready yet..."
             sleep 20
           done
 
@@ -74,9 +114,14 @@ jobs:
       - name: Get Backend URL
         id: geturl
         run: |
-          DOMAIN="backend.example.com"
+          DOMAIN="poc-api.autovrse.app"
           echo "Backend URL: https://$DOMAIN"
           echo "backend_url=https://$DOMAIN" >> $GITHUB_OUTPUT
+
+      - name: Install Helm
+        run: |
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
 
       - name: Print Backend URL
         run: echo "✅ Your backend is live at ${{ steps.geturl.outputs.backend_url }}"

@@ -41,8 +41,17 @@ jobs:
       - name: 🔌 Update Kubeconfig
         run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
 
-      # 1. Install Ingress Controller
-      - name: 🌐 Install NGINX Ingress
+      # 1. Cleanup Existing Ingress Resources (Optional but recommended for clean Helm install)
+      - name: 🧹 Cleanup old ingress-nginx (if any)
+        run: |
+          kubectl delete namespace ingress-nginx --ignore-not-found
+          kubectl delete clusterrole ingress-nginx --ignore-not-found
+          kubectl delete clusterrolebinding ingress-nginx --ignore-not-found
+          kubectl delete validatingwebhookconfiguration ingress-nginx-admission --ignore-not-found
+          sleep 20
+
+      # 2. Install NGINX Ingress Controller via Helm
+      - name: 🌐 Install NGINX Ingress Controller
         run: |
           helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
           helm repo update
@@ -51,7 +60,7 @@ jobs:
             --create-namespace \
             --set controller.publishService.enabled=true
 
-      # 2. Install cert-manager
+      # 3. Install cert-manager
       - name: 🔒 Install cert-manager
         run: |
           helm repo add jetstack https://charts.jetstack.io
@@ -61,8 +70,8 @@ jobs:
             --create-namespace \
             --set installCRDs=true
 
-      # 3. Create ClusterIssuer (TLS)
-      - name: 📄 Create ClusterIssuer
+      # 4. Create ClusterIssuer for Let's Encrypt TLS
+      - name: 📄 Create ClusterIssuer for TLS
         run: |
           cat <<EOF > cluster-issuer.yaml
           apiVersion: cert-manager.io/v1
@@ -82,13 +91,13 @@ jobs:
           EOF
           kubectl apply -f cluster-issuer.yaml
 
-      # 4. Deploy Backend
-      - name: 🚀 Deploy Backend Workloads
+      # 5. Deploy Backend Kubernetes Resources
+      - name: 🚀 Deploy Backend
         run: |
           kubectl apply -f $BACKEND_DIR/deployment.yaml
           kubectl apply -f $BACKEND_DIR/service.yaml
 
-      # 5. Create Ingress with TLS
+      # 6. Create Ingress with TLS using cert-manager
       - name: 🌍 Create Ingress for Backend
         run: |
           cat <<EOF > backend-ingress.yaml

@@ -87,8 +87,8 @@ jobs:
 
       - name: Apply Ingress and TLS (cert-manager)
         run: |
-          kubectl apply -f cluster-issuer.yaml
-          kubectl apply -f cert-backend.yaml
+          kubectl apply -f vrse-builder-backend-main/cluster-issuer.yaml
+          kubectl apply -f vrse-builder-backend-main/cert-backend.yaml
           kubectl apply -f vrse-builder-backend-main/backend-ingress.yaml
 
       - name: Verify Backend Deployment

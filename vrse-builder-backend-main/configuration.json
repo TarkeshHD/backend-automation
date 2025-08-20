@@ -1,0 +1,127 @@
+{
+  "clientId": "645278b8e4ec736b2cb8be49",
+  "clientName": "AutovrseTest",
+  "instanceIdentifier": "Shell Reactor Internals VR Experience",
+  "domainUrl": "https://www.fjfsbo.com/dner",
+  "client": {
+    "appName": "VRse Builder",
+    "appDescription": "Autovrse Creation",
+    "contactUrl": "https://support.autovrse.in/hc/en-us/requests/new"
+  },
+  "theme": {
+    "palette": {
+      "primary": {
+        "lightest": "#F5F7FF",
+        "light": "#EBEEFE",
+        "main": "#6366F1",
+        "dark": "#4338CA",
+        "darkest": "#312E81",
+        "contrastText": "#FFFFFF"
+      },
+      "secondary": "#363635"
+    }
+  },
+  "clientLogo": "images/AVrseLogo.png",
+  "minQuestions": 10,
+  "features": {
+    "auth": {
+      "state": "on",
+      "types": ["BasicAuth", "SsoAuth", "DomainAuth"]
+    },
+    "logs": {
+      "state": "on"
+    },
+    "modules": {
+      "state": "on"
+    },
+    "devices": {
+      "state": "on"
+    },
+    "userManagement": {
+      "state": "on"
+    },
+    "evaluation": {
+      "state": "on"
+    },
+    "training": {
+      "state": "off"
+    },
+    "reports": {
+      "state": "on"
+    },
+    "supports": {
+      "state": "on"
+    },
+    "cms": {
+      "state": "on"
+    },
+    "knowledgeRep": {
+      "state": "on"
+    },
+    "deviceLogin": {
+      "state": "on"
+    },
+    "traineeType": {
+      "state": "off",
+      "values": ["Employee", "GAT", "DAT", "Trainee", "Contract"],
+      "label": {
+        "singular": "Trainee Type",
+        "plural": "Trainee Types"
+      }
+    },
+    "archive": {
+      "state": "off",
+      "auth": "on",
+      "authValues": {
+        "userName": "admin_autovrse",
+        "password": "admin_autovrse"
+      },
+      "authUrl": "https://api.autovrse-training.com/auth/user/login",
+      "dataUrl": "https://api.autovrse-training.com/api/v1/session/all"
+    },
+    "schedule": {
+      "state": "off"
+    },
+    "questionActionEvaluation": {
+      "state": "on"
+    },
+    "jsonLifecycleEvaluation": {
+      "state": "on",
+      "passPercentage": 0.5,
+      "wrongReduction": 0.2
+    },
+    "moduleOtpLogin": {
+      "state": "on"
+    }
+  },
+  "expiryTimes": {
+    "token": "12h",
+    "otp": "1m"
+  },
+  "deviceLoginLimit": 10,
+  "passingMarks": 6,
+ 
+  "labels": {
+    "domain": {
+      "singular": "Domain",
+      "plural": "Domains"
+    },
+    "user": {
+      "singular": "User",
+      "plural": "Users"
+    },
+    "module": {
+      "singular": "Module",
+      "plural": "Modules"
+    },
+    "evaluation": {
+      "singular": "Evaluation",
+      "plural": "Evaluations"
+    },
+    "department": {
+      "singular": "Department",
+      "plural": "Departments"
+    }
+  }
+}
+ 

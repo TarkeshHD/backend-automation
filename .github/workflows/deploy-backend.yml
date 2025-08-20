@@ -15,7 +15,7 @@ jobs:
       CERT_MANAGER_VERSION: v1.14.4
 
     steps:
-      - name: Checkout source code
+      - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Configure AWS credentials
@@ -28,87 +28,56 @@ jobs:
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
 
-      - name: Install NGINX Ingress Controller
+      - name: Wait for DNS propagation
         run: |
-          if ! kubectl get ns ingress-nginx >/dev/null 2>&1; then
-            echo "Installing ingress-nginx..."
-            kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/cloud/deploy.yaml
-            echo "Waiting for ingress-nginx controller to be ready..."
-            kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=300s
-          else
-            echo "ingress-nginx already installed"
-          fi
+          echo "Waiting for DNS to propagate..."
+          sleep 120
 
-      - name: Install cert-manager if not installed
+      - name: Install cert-manager
         run: |
           if ! kubectl get ns cert-manager >/dev/null 2>&1; then
             echo "Installing cert-manager..."
             kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml
-            echo "Waiting for cert-manager pods..."
             kubectl rollout status deployment/cert-manager -n cert-manager --timeout=180s
             kubectl rollout status deployment/cert-manager-webhook -n cert-manager --timeout=180s
           else
-            echo "cert-manager already exists"
+            echo "cert-manager already installed"
           fi
 
-      - name: Create ClusterIssuer
-        run: |
-          cat <<EOF | kubectl apply -f -
-          apiVersion: cert-manager.io/v1
-          kind: ClusterIssuer
-          metadata:
-            name: letsencrypt-prod
-          spec:
-            acme:
-              server: https://acme-v02.api.letsencrypt.org/directory
-              email: tarkesh@autovrse.in
-              privateKeySecretRef:
-                name: letsencrypt-prod
-              solvers:
-              - http01:
-                  ingress:
-                    class: nginx
-          EOF
+      - name: Apply ClusterIssuer
+        run: kubectl apply -f vrse-builder-backend-main/cluster-issuer.yaml
 
-      - name: Apply backend manifests
+      - name: Deploy MongoDB
         run: |
-          kubectl apply -f backend-deployment.yaml
-          kubectl apply -f backend-service.yaml
-          kubectl apply -f backend-ingress.yaml
+          kubectl apply -f vrse-builder-backend-main/mongodb-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/mongodb-service.yaml
 
-      - name: Wait for backend deployment rollout
+      - name: Deploy Backend
         run: |
-          echo "⏳ Waiting for backend deployment rollout..."
+          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-service.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-ingress.yaml
+
+      - name: Wait for backend deployment
+        run: |
+          echo "Waiting for backend rollout..."
           kubectl rollout status deployment/backend-deployment --timeout=300s
-          echo "✅ Backend deployment is ready"
 
-      - name: Wait for Ingress External IP
+      - name: Wait for TLS certificate
         run: |
-          echo "⏳ Waiting for Ingress external IP..."
+          echo "Waiting for TLS certificate to be issued..."
           for i in {1..30}; do
-            EXTERNAL_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-            if [[ "$EXTERNAL_IP" != "" ]]; then
-              echo "✅ External IP/Hostname assigned: $EXTERNAL_IP"
-              echo "BACKEND_EXTERNAL_HOST=$EXTERNAL_IP" >> $GITHUB_ENV
+            STATUS=$(kubectl get certificate -A | grep backend-tls || true)
+            if [[ "$STATUS" == *"True"* ]]; then
+              echo "✅ TLS Certificate ready"
               break
             fi
-            echo "Waiting... ($i/30)"
-            sleep 10
+            echo "Waiting..."
+            sleep 20
           done
 
-      - name: Wait for TLS certificate to be issued
+      - name: Get Backend Ingress URL
         run: |
-          echo "⏳ Waiting for TLS certificate (backend-tls)..."
-          for i in {1..30}; do
-            STATUS=$(kubectl get certificate backend-tls -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-            if [[ "$STATUS" == "True" ]]; then
-              echo "✅ TLS certificate is ready"
-              break
-            fi
-            echo "Still waiting... ($i/30)"
-            sleep 10
-          done
-
-      - name: Confirm backend HTTPS domain
-        run: |
-          echo "🔗 Backend is live at: https://poc-api.autovrse.app"
+          INGRESS_IP=$(kubectl get ingress backend-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "Backend is live at: https://$INGRESS_IP"
+          echo "BACKEND_URL=https://$INGRESS_IP" >> $GITHUB_ENV

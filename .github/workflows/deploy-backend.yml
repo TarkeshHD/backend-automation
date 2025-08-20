@@ -1,83 +1,96 @@
 name: Deploy Backend to EKS
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
-  deploy:
+  deploy-backend:
     runs-on: ubuntu-latest
 
-    env:
-      AWS_REGION: us-east-1
-      CLUSTER_NAME: Backend-cluster
-      CERT_MANAGER_VERSION: v1.14.4
-
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
-
-      - name: Wait for DNS propagation
+      - name: Install eksctl and kubectl
         run: |
-          echo "Waiting for DNS to propagate..."
-          sleep 120
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
-      - name: Install cert-manager
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR Repository if not exists
         run: |
-          if ! kubectl get ns cert-manager >/dev/null 2>&1; then
-            echo "Installing cert-manager..."
-            kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml
-            kubectl rollout status deployment/cert-manager -n cert-manager --timeout=180s
-            kubectl rollout status deployment/cert-manager-webhook -n cert-manager --timeout=180s
-          else
-            echo "cert-manager already installed"
+          REPO_NAME="backend"
+          if ! aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1; then
+            aws ecr create-repository --repository-name $REPO_NAME
           fi
 
-      - name: Apply ClusterIssuer
-        run: kubectl apply -f vrse-builder-backend-main/cluster-issuer.yaml
-
-      - name: Deploy MongoDB
+      - name: Build and Push Backend Docker image
         run: |
-          kubectl apply -f vrse-builder-backend-main/mongodb-deployment.yaml
-          kubectl apply -f vrse-builder-backend-main/mongodb-service.yaml
+          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
+          TAG="${GITHUB_SHA::7}"
 
-      - name: Deploy Backend
+          docker build -f vrse-builder-backend-main/Dockerfile \
+            -t "$BACKEND_IMAGE:$TAG" \
+            -t "$BACKEND_IMAGE:latest" \
+            ./vrse-builder-backend-main
+
+          docker push "$BACKEND_IMAGE:$TAG"
+          docker push "$BACKEND_IMAGE:latest"
+
+      - name: Ensure EKS Cluster Exists
         run: |
+          CLUSTER_NAME="Backend-cluster"
+          REGION="${{ secrets.AWS_REGION }}"
+          STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
+
+          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
+            echo "✅ Cluster $CLUSTER_NAME exists."
+          elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
+            echo "⚠️ Stack $STACK_NAME exists. Skipping creation."
+          else
+            eksctl create cluster \
+              --name "$CLUSTER_NAME" \
+              --region "$REGION" \
+              --nodegroup-name standard-workers \
+              --node-type t3.medium \
+              --nodes 2 \
+              --nodes-min 1 \
+              --nodes-max 3 \
+              --managed
+          fi
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name Backend-cluster --region ${{ secrets.AWS_REGION }}
+
+      - name: Deploy Backend & MongoDB
+        run: |
+          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
+          TAG="${GITHUB_SHA::7}"
+
+          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" vrse-builder-backend-main/backend-deployment.yaml
           kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
           kubectl apply -f vrse-builder-backend-main/backend-service.yaml
+
+      - name: Apply Ingress and TLS (cert-manager)
+        run: |
+          kubectl apply -f cluster-issuer.yaml
+          kubectl apply -f cert-backend.yaml
           kubectl apply -f vrse-builder-backend-main/backend-ingress.yaml
 
-      - name: Wait for backend deployment
+      - name: Verify Backend Deployment
         run: |
-          echo "Waiting for backend rollout..."
-          kubectl rollout status deployment/backend-deployment --timeout=300s
-
-      - name: Wait for TLS certificate
-        run: |
-          echo "Waiting for TLS certificate to be issued..."
-          for i in {1..30}; do
-            STATUS=$(kubectl get certificate -A | grep backend-tls || true)
-            if [[ "$STATUS" == *"True"* ]]; then
-              echo "✅ TLS Certificate ready"
-              break
-            fi
-            echo "Waiting..."
-            sleep 20
-          done
-
-      - name: Get Backend Ingress URL
-        run: |
-          INGRESS_IP=$(kubectl get ingress backend-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-          echo "Backend is live at: https://$INGRESS_IP"
-          echo "BACKEND_URL=https://$INGRESS_IP" >> $GITHUB_ENV
+          kubectl rollout status deployment/backend-deployment

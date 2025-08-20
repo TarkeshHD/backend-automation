@@ -72,6 +72,34 @@ jobs:
               --managed
           fi
 
+
+        # ✅ Wait for External IP and display it
+      - name: Wait for External IP (Ingress-NGINX)
+        id: wait-for-ip
+        run: |
+          echo "🔄 Waiting for External IP from ingress-nginx-controller service..."
+          for i in {1..30}; do
+            EXTERNAL_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            if [[ -z "$EXTERNAL_IP" ]]; then
+              echo "Attempt $i: No external IP yet. Retrying in 10s..."
+              sleep 10
+            else
+              echo "✅ External IP found: $EXTERNAL_IP"
+              echo "::set-output name=external_ip::$EXTERNAL_IP"
+              break
+            fi
+          done
+
+          if [[ -z "$EXTERNAL_IP" ]]; then
+            echo "❌ Failed to get External IP after waiting."
+            exit 1
+          fi
+
+      - name: Show External IP in next step
+        run: |
+          echo "🌐 External IP or Hostname: ${{ steps.wait-for-ip.outputs.external_ip }}"
+
+
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig --name Backend-cluster --region ${{ secrets.AWS_REGION }}

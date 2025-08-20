@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapRoles: |
+    - rolearn: arn:aws:iam::133354030153:role/arn:aws:eks:us-east-1:133354030153:nodegroup/Backend-cluster/standard-workers/94cc60a7-64d9-f31f-b520-ec3b64320708
+      username: system:node:{{EC2PrivateDNSName}}
+      groups:
+        - system:bootstrappers
+        - system:nodes
+  mapUsers: |
+    - userarn: arn:aws:iam::133354030153:user/amplify-dev
+      username: admin
+      groups:
+        - system:masters

@@ -1,130 +1,157 @@
-name: Deploy Backend to EKS
+name: Deploy Backend and MongoDB to EKS
 
 on:
-  push:
-    branches:
-      - main
-
-env:
-  EKS_CLUSTER_NAME: Backend-cluster
-  AWS_REGION: us-east-1
-  BACKEND_DOMAIN: poc-api.autovrse.app
-  ECR_REPOSITORY: backend-app
-  IMAGE_TAG: latest
-  K8S_NAMESPACE: default
+  workflow_dispatch:
 
 jobs:
-  deploy:
-    name: Build and Deploy Backend
+  deploy-backend:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      # ✅ Checkout repository
+      - uses: actions/checkout@v3
 
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      # ✅ Setup AWS Credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
+      # ✅ Install eksctl and kubectl
+      - name: Install eksctl and kubectl
+        run: |
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
-    - name: Build and Push Docker Image to ECR
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-      run: |
-        docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
-        docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        echo "IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
+      # ✅ Login to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Setup kubectl
-      uses: azure/setup-kubectl@v3
-      with:
-        version: v1.29.0
+      # ✅ Auto-create ECR repo if not exists
+      - name: Create ECR Repository if not exists
+        run: |
+          REPO_NAME="backend"
+          if ! aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1; then
+            echo "Creating ECR repository: $REPO_NAME"
+            aws ecr create-repository --repository-name $REPO_NAME
+          else
+            echo "ECR repository $REPO_NAME already exists."
+          fi
 
-    - name: Update Kubeconfig
-      run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+      # ✅ Build and Push Backend Docker image
+      - name: Build and Push Backend Docker image
+        run: |
+          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
+          TAG="${GITHUB_SHA::7}"
+          echo "Building backend image: $BACKEND_IMAGE:$TAG"
 
-    - name: Create Kubernetes ConfigMap with configuration.json
-      run: |
-        echo '${{ secrets.CONFIGURATION_JSON }}' > configuration.json
-        kubectl delete configmap backend-config --ignore-not-found
-        kubectl create configmap backend-config --from-file=configuration.json
+          docker build -f vrse-builder-backend-main/Dockerfile \
+            -t "$BACKEND_IMAGE:$TAG" \
+            -t "$BACKEND_IMAGE:latest" \
+            ./vrse-builder-backend-main
+          docker push "$BACKEND_IMAGE:$TAG"
+          docker push "$BACKEND_IMAGE:latest"
 
-    - name: Deploy to EKS using kubectl
-      run: |
-        cat <<EOF | kubectl apply -f -
-        apiVersion: apps/v1
-        kind: Deployment
-        metadata:
-          name: backend-deployment
-          namespace: $K8S_NAMESPACE
-        spec:
-          replicas: 2
-          selector:
-            matchLabels:
-              app: backend
-          template:
-            metadata:
-              labels:
-                app: backend
-            spec:
-              containers:
-              - name: backend
-                image: $IMAGE
-                ports:
-                - containerPort: 5000
-                volumeMounts:
-                - name: config-volume
-                  mountPath: /app/configuration.json
-                  subPath: configuration.json
-              volumes:
-              - name: config-volume
-                configMap:
-                  name: backend-config
-        ---
-        apiVersion: v1
-        kind: Service
-        metadata:
-          name: backend-service
-          namespace: $K8S_NAMESPACE
-        spec:
-          selector:
-            app: backend
-          ports:
-            - protocol: TCP
-              port: 80
-              targetPort: 5000
-          type: ClusterIP
-        ---
-        apiVersion: networking.k8s.io/v1
-        kind: Ingress
-        metadata:
-          name: backend-ingress
-          namespace: $K8S_NAMESPACE
-          annotations:
-            kubernetes.io/ingress.class: nginx
-            cert-manager.io/cluster-issuer: letsencrypt-prod
-            nginx.ingress.kubernetes.io/ssl-redirect: "true"
-        spec:
-          tls:
-          - hosts:
-            - $BACKEND_DOMAIN
-            secretName: backend-tls
-          rules:
-          - host: $BACKEND_DOMAIN
-            http:
-              paths:
-              - path: /
-                pathType: Prefix
-                backend:
-                  service:
-                    name: backend-service
-                    port:
-                      number: 80
-        EOF
+      # ✅ Ensure EKS Cluster exists
+      - name: Ensure EKS Cluster
+        run: |
+          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
+          REGION="${{ secrets.AWS_REGION }}"
+          STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
+
+          echo "🔍 Checking EKS cluster..."
+          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
+            echo "✅ Cluster $CLUSTER_NAME exists."
+          elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
+            echo "⚠️ Stack $STACK_NAME exists. Skipping creation."
+          else
+            echo "🚀 Creating new EKS cluster: $CLUSTER_NAME..."
+            eksctl create cluster \
+              --name "$CLUSTER_NAME" \
+              --region "$REGION" \
+              --nodegroup-name standard-workers \
+              --node-type t3.medium \
+              --nodes 2 \
+              --nodes-min 1 \
+              --nodes-max 3 \
+              --managed
+          fi
+
+      # ✅ Generate kubeconfig
+      - name: Generate kubeconfig
+        run: |
+          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
+          REGION="${{ secrets.AWS_REGION }}"
+
+          echo "⌛ Waiting for cluster to be active..."
+          aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
+
+          echo "🔑 Updating kubeconfig..."
+          aws eks update-kubeconfig \
+            --name "$CLUSTER_NAME" \
+            --region "$REGION"
+
+      # ✅ Deploy NGINX Ingress Controller (if not present)
+      - name: Deploy NGINX Ingress Controller
+        run: |
+          if ! kubectl get ns ingress-nginx >/dev/null 2>&1; then
+            kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/aws/deploy.yaml
+            kubectl rollout status deployment ingress-nginx-controller -n ingress-nginx
+          else
+            echo "NGINX Ingress already exists."
+          fi
+
+      # ✅ Deploy Cert-Manager (if not present)
+      - name: Deploy Cert Manager
+        run: |
+          if ! kubectl get ns cert-manager >/dev/null 2>&1; then
+            kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.yaml
+            kubectl rollout status deployment cert-manager -n cert-manager
+          else
+            echo "Cert Manager already installed."
+          fi
+
+      # ✅ Apply Cert Issuer
+      - name: Apply Let's Encrypt ClusterIssuer
+        working-directory: vrse-builder-backend-main
+        run: |
+          kubectl apply -f letsencrypt-clusterissuer.yaml
+
+      # ✅ Deploy MongoDB
+      - name: Deploy MongoDB
+        working-directory: vrse-builder-backend-main
+        run: |
+          kubectl apply -f mongodb-pvc.yaml
+          kubectl apply -f mongodb-deployment.yaml
+          kubectl apply -f mongodb-service.yaml
+          kubectl apply -f mongodb-poddisruptionbudget.yaml
+          kubectl apply -f rbac-restrict-delete.yaml
+
+      # ✅ Deploy Backend
+      - name: Deploy Backend
+        working-directory: vrse-builder-backend-main
+        run: |
+          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
+          TAG="${GITHUB_SHA::7}"
+          echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
+
+          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
+          kubectl apply -f backend-deployment.yaml
+          kubectl apply -f backend-service.yaml
+
+      # ✅ Deploy Backend Ingress
+      - name: Deploy Ingress
+        working-directory: vrse-builder-backend-main
+        run: |
+          kubectl apply -f backend-ingress.yaml
+
+      # ✅ Verify rollout
+      - name: Verify Deployment
+        run: |
+          kubectl rollout status deployment/backend-deployment

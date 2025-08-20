@@ -97,33 +97,7 @@ jobs:
             --name "$CLUSTER_NAME" \
             --region "$REGION"
 
-      # ✅ Deploy NGINX Ingress Controller (if not present)
-      - name: Deploy NGINX Ingress Controller
-        run: |
-          if ! kubectl get ns ingress-nginx >/dev/null 2>&1; then
-            kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/aws/deploy.yaml
-            kubectl rollout status deployment ingress-nginx-controller -n ingress-nginx
-          else
-            echo "NGINX Ingress already exists."
-          fi
-
-      # ✅ Deploy Cert-Manager (if not present)
-      - name: Deploy Cert Manager
-        run: |
-          if ! kubectl get ns cert-manager >/dev/null 2>&1; then
-            kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.yaml
-            kubectl rollout status deployment cert-manager -n cert-manager
-          else
-            echo "Cert Manager already installed."
-          fi
-
-      # ✅ Apply Cert Issuer
-      - name: Apply Let's Encrypt ClusterIssuer
-        working-directory: vrse-builder-backend-main
-        run: |
-          kubectl apply -f letsencrypt-clusterissuer.yaml
-
-      # ✅ Deploy MongoDB
+      # ✅ Deploy MongoDB (containerized + persistent + RBAC)
       - name: Deploy MongoDB
         working-directory: vrse-builder-backend-main
         run: |
@@ -144,14 +118,17 @@ jobs:
           sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
-
-      # ✅ Deploy Backend Ingress
-      - name: Deploy Ingress
-        working-directory: vrse-builder-backend-main
-        run: |
           kubectl apply -f backend-ingress.yaml
 
       # ✅ Verify rollout
-      - name: Verify Deployment
+      - name: Verify Backend Deployment
         run: |
           kubectl rollout status deployment/backend-deployment
+
+      # ✅ Output DNS and Backend URL
+      - name: Show Backend DNS and URL
+        run: |
+          echo "📡 Getting Backend Ingress DNS..."
+          DNS=$(kubectl get ingress backend-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "📌 Ingress DNS: $DNS"
+          echo "🌐 Backend URL: https://poc-api.autovrse.app"

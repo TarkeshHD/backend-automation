@@ -8,10 +8,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repository
       - uses: actions/checkout@v3
 
-      # ✅ Setup AWS Credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -19,7 +17,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ Install eksctl and kubectl
       - name: Install eksctl and kubectl
         run: |
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
@@ -28,12 +25,10 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Auto-create ECR repo if not exists
       - name: Create ECR Repository if not exists
         run: |
           REPO_NAME="backend"
@@ -44,7 +39,6 @@ jobs:
             echo "ECR repository $REPO_NAME already exists."
           fi
 
-      # ✅ Build and Push Backend Docker image
       - name: Build and Push Backend Docker image
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
@@ -58,20 +52,17 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Ensure EKS Cluster exists
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
           STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
 
-          echo "🔍 Checking EKS cluster..."
           if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
             echo "✅ Cluster $CLUSTER_NAME exists."
           elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
             echo "⚠️ Stack $STACK_NAME exists. Skipping creation."
           else
-            echo "🚀 Creating new EKS cluster: $CLUSTER_NAME..."
             eksctl create cluster \
               --name "$CLUSTER_NAME" \
               --region "$REGION" \
@@ -83,21 +74,13 @@ jobs:
               --managed
           fi
 
-      # ✅ Generate kubeconfig
       - name: Generate kubeconfig
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
-
-          echo "⌛ Waiting for cluster to be active..."
           aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
 
-          echo "🔑 Updating kubeconfig..."
-          aws eks update-kubeconfig \
-            --name "$CLUSTER_NAME" \
-            --region "$REGION"
-
-      # ✅ Deploy MongoDB (containerized + persistent + RBAC)
       - name: Deploy MongoDB
         working-directory: vrse-builder-backend-main
         run: |
@@ -107,28 +90,28 @@ jobs:
           kubectl apply -f mongodb-poddisruptionbudget.yaml
           kubectl apply -f rbac-restrict-delete.yaml
 
-      # ✅ Deploy Backend
       - name: Deploy Backend
         working-directory: vrse-builder-backend-main
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
-
           sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
           kubectl apply -f backend-ingress.yaml
 
-      # ✅ Verify rollout
       - name: Verify Backend Deployment
         run: |
+          echo "⏳ Waiting for deployment to be created..."
+          sleep 10
+          kubectl get deployments
           kubectl rollout status deployment/backend-deployment
 
-      # ✅ Output DNS and Backend URL
-      - name: Show Backend DNS and URL
+      - name: Output Backend URL
         run: |
-          echo "📡 Getting Backend Ingress DNS..."
-          DNS=$(kubectl get ingress backend-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-          echo "📌 Ingress DNS: $DNS"
-          echo "🌐 Backend URL: https://poc-api.autovrse.app"
+          echo "Fetching Backend LoadBalancer DNS..."
+          BACKEND_DNS=$(kubectl get ingress backend-ingress -o jsonpath="{.status.loadBalancer.ingress[0].hostname}")
+          BACKEND_URL="https://poc-api.autovrse.app"
+          echo "✅ Backend is live at: $BACKEND_URL"
+          echo "Backend DNS: $BACKEND_DNS"

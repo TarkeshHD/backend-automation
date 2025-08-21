@@ -22,6 +22,12 @@ spec:
           env:
             - name: MONGO_URL
               value: mongodb://admin:admin@mongodb:27017
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: JWT_SECRET
+              value: your_test_secret_key
 
         - name: mongodb
           image: mongo:6.0

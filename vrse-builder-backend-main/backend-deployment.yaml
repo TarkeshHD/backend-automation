@@ -1,27 +1,34 @@
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: backend-deployment
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
-    metadata:
-      labels:
-        app: backend
     spec:
+      terminationGracePeriodSeconds: 30
       containers:
         - name: backend
-          image: <your-backend-image>
+          image: <replaced by CI>
           ports:
-            - containerPort: 5000
-          volumeMounts:
-            - name: config-volume
-              mountPath: /app/configuration.json
-              subPath: configuration.json
-      volumes:
-        - name: config-volume
-          configMap:
-            name: backend-config
+            - containerPort: 3000
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6

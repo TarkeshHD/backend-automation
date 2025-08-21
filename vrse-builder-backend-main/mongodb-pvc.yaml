@@ -8,4 +8,4 @@ spec:
   resources:
     requests:
       storage: 1Gi
-  storageClassName: gp3  # use gp3 if gp2 is not available
+

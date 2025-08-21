@@ -2,10 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mongodb
-  labels:
-    app: mongodb
-  finalizers:
-    - protect.pod/deletion
 spec:
   replicas: 1
   selector:
@@ -23,13 +19,13 @@ spec:
             - containerPort: 27017
           env:
             - name: MONGO_INITDB_ROOT_USERNAME
-              value: "admin"
+              value: admin
             - name: MONGO_INITDB_ROOT_PASSWORD
-              value: "admin"
+              value: admin
           volumeMounts:
-            - name: mongo-data
-              mountPath: /data/db
+            - mountPath: /data/db
+              name: mongo-storage
       volumes:
-        - name: mongo-data
+        - name: mongo-storage
           persistentVolumeClaim:
             claimName: mongodb-pvc

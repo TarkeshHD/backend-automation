@@ -8,10 +8,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repo
+      # ✅ Checkout repository
       - uses: actions/checkout@v3
 
-      # ✅ Configure AWS
+      # ✅ Setup AWS Credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -28,12 +28,12 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Login to ECR
+      # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Create ECR Repo if not exists
+      # ✅ Auto-create ECR repo if not exists
       - name: Create ECR Repository if not exists
         run: |
           REPO_NAME="backend"
@@ -44,7 +44,7 @@ jobs:
             echo "ECR repository $REPO_NAME already exists."
           fi
 
-      # ✅ Build & Push Docker image
+      # ✅ Build and Push Backend Docker image
       - name: Build and Push Backend Docker image
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
@@ -58,7 +58,7 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Ensure EKS Cluster
+      # ✅ Ensure EKS Cluster exists
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
@@ -81,7 +81,6 @@ jobs:
               --nodes-min 1 \
               --nodes-max 3 \
               --managed
-          fi
 
       # ✅ Generate kubeconfig
       - name: Generate kubeconfig
@@ -97,51 +96,31 @@ jobs:
             --name "$CLUSTER_NAME" \
             --region "$REGION"
 
-      # ✅ Install Ingress and cert-manager
-      - name: Setup Ingress and cert-manager
-        run: |
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
-          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-          helm repo update
-
-          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-            --namespace ingress-nginx --create-namespace
-
-          kubectl apply --validate=false -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-
-      # ✅ Apply HTTPS Configs
-      - name: Apply HTTPS ClusterIssuer and Ingress
-        working-directory: vrse-builder-backend-main
-        run: |
-          kubectl apply -f cluster-issuer.yaml
-          kubectl apply -f backend-ingress.yaml
-
-      # ✅ Deploy MongoDB
-      - name: Deploy MongoDB
+      # ✅ Apply PVC for MongoDB
+      - name: Deploy MongoDB Persistent Volume Claim
         working-directory: vrse-builder-backend-main
         run: |
           kubectl apply -f mongodb-pvc.yaml
-          kubectl apply -f mongodb-deployment.yaml
-          kubectl apply -f mongodb-service.yaml
-          kubectl apply -f mongodb-poddisruptionbudget.yaml
-          kubectl apply -f rbac-restrict-delete.yaml
 
-      # ✅ Deploy Backend
-      - name: Deploy Backend
+      # ✅ Deploy Backend + MongoDB (combined pod)
+      - name: Deploy Backend (includes MongoDB container)
         working-directory: vrse-builder-backend-main
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
 
-          # SAFELY replace image line
-          sed -i "s|\(image: \).*|\1$BACKEND_IMAGE:$TAG|" backend-deployment.yaml
-
+          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
-      # ✅ Rollout Check
-      - name: Verify Deployment
+      # ✅ Verify rollout
+      - name: Verify Deployment Rollout
         run: |
           kubectl rollout status deployment/backend-deployment
+
+      # 🆕 ✅ Check Pod Status
+      - name: Show Pod Status
+        run: |
+          echo "📦 Current Pod Status:"
+          kubectl get pods -l app=backend -o wide

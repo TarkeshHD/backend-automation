@@ -125,9 +125,11 @@ jobs:
           kubectl get pods -l app=backend -o jsonpath='{.items[*].spec.containers[*].name}'
           echo ""
 
-      # ✅ Show Backend Logs
       - name: Backend Container Logs
         run: |
-          POD=$(kubectl get pods -l app=backend -o jsonpath='{.items[0].metadata.name}')
-          echo "📄 Backend logs from $POD:"
-          kubectl logs "$POD" -c backend --tail=50
+          POD=$(kubectl get pods -l app=backend \
+            -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' \
+             | head -n 1)
+           echo "📄 Backend logs from $POD:"
+           kubectl logs "$POD" -c backend --tail=50
+

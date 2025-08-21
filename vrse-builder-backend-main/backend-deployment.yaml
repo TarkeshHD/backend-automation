@@ -18,4 +18,25 @@ spec:
         - name: backend
           image: 133354030153.dkr.ecr.us-east-1.amazonaws.com/backend
           ports:
-            - containerPort: 5000
+            - containerPort: 3000
+          env:
+            - name: MONGO_URL
+              value: mongodb://admin:admin@localhost:27017
+
+        - name: mongodb
+          image: mongo:6.0
+          ports:
+            - containerPort: 27017
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              value: admin
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              value: admin
+          volumeMounts:
+            - mountPath: /data/db
+              name: mongo-storage
+
+      volumes:
+        - name: mongo-storage
+          persistentVolumeClaim:
+            claimName: mongodb-pvc

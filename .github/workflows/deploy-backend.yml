@@ -7,8 +7,13 @@ jobs:
   deploy-backend:
     runs-on: ubuntu-latest
 
+    env:
+      BACKEND_IMAGE_NAME: backend
+      BACKEND_DOMAIN: poc-api.autovrse.app
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
@@ -21,7 +26,7 @@ jobs:
         run: |
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin
-          curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
@@ -31,17 +36,16 @@ jobs:
 
       - name: Create ECR Repository if not exists
         run: |
-          REPO_NAME="backend"
-          if ! aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1; then
-            echo "Creating ECR repository: $REPO_NAME"
-            aws ecr create-repository --repository-name $REPO_NAME
+          if ! aws ecr describe-repositories --repository-names $BACKEND_IMAGE_NAME >/dev/null 2>&1; then
+            echo "Creating ECR repository: $BACKEND_IMAGE_NAME"
+            aws ecr create-repository --repository-name $BACKEND_IMAGE_NAME
           else
-            echo "ECR repository $REPO_NAME already exists."
+            echo "ECR repository $BACKEND_IMAGE_NAME already exists."
           fi
 
-      - name: Build and Push Backend Docker image
+      - name: Build and Push Backend Docker Image
         run: |
-          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
+          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/$BACKEND_IMAGE_NAME"
           TAG="${GITHUB_SHA::7}"
           echo "Building backend image: $BACKEND_IMAGE:$TAG"
 
@@ -52,7 +56,7 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      - name: Ensure EKS Cluster
+      - name: Ensure EKS Cluster Exists
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
@@ -95,28 +99,30 @@ jobs:
           kubectl apply -f mongodb-poddisruptionbudget.yaml
           kubectl apply -f rbac-restrict-delete.yaml
 
+          echo "⏳ Waiting for MongoDB pod to be ready..."
+          kubectl wait --for=condition=Ready pod -l app=mongodb --timeout=180s
+
       - name: Deploy Backend
         working-directory: vrse-builder-backend-main
         run: |
-          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
+          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/$BACKEND_IMAGE_NAME"
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
           sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
+
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
           kubectl apply -f backend-ingress.yaml
 
       - name: Verify Backend Deployment
         run: |
-          echo "⏳ Waiting for deployment to be created..."
+          echo "⏳ Waiting for backend rollout..."
           sleep 10
-          kubectl get deployments
           kubectl rollout status deployment/backend-deployment
 
       - name: Output Backend URL and DNS
         run: |
-          echo "Fetching Backend LoadBalancer DNS..."
+          echo "✅ Backend deployed successfully!"
           BACKEND_DNS=$(kubectl get ingress backend-ingress -o jsonpath="{.status.loadBalancer.ingress[0].hostname}")
-          BACKEND_URL="https://poc-api.autovrse.app"
-          echo "✅ Backend is live at: $BACKEND_URL"
-          echo "🔗 Backend DNS: $BACKEND_DNS"
+          echo "🌐 Backend URL: https://${{ env.BACKEND_DOMAIN }}"
+          echo "🔗 LoadBalancer DNS: $BACKEND_DNS"

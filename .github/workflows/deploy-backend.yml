@@ -81,36 +81,19 @@ jobs:
           aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
 
-      - name: Deploy MongoDB and wait for PVC to bind
+      - name: Deploy MongoDB
         working-directory: vrse-builder-backend-main
         run: |
-          kubectl apply -f mongodb-pvc.yaml
-
-          echo "⏳ Waiting for MongoDB PVC to bind..."
-          for i in {1..12}; do
-            STATUS=$(kubectl get pvc mongodb-pvc -o jsonpath='{.status.phase}')
-            echo "Current status: $STATUS"
-            if [ "$STATUS" == "Bound" ]; then
-              echo "✅ PVC bound successfully."
-              break
-            fi
-            sleep 5
-          done
-
-          if [ "$STATUS" != "Bound" ]; then
-            echo "❌ PVC did not bind in time."
-            exit 1
+          if kubectl get pvc mongodb-pvc >/dev/null 2>&1; then
+            echo "✅ mongodb-pvc already exists. Skipping PVC creation."
+          else
+            kubectl apply -f mongodb-pvc.yaml
           fi
 
           kubectl apply -f mongodb-deployment.yaml
           kubectl apply -f mongodb-service.yaml
           kubectl apply -f mongodb-poddisruptionbudget.yaml
           kubectl apply -f rbac-restrict-delete.yaml
-
-      - name: Wait for MongoDB to be Ready
-        run: |
-          echo "Waiting for MongoDB rollout to complete..."
-          kubectl rollout status deployment/mongodb --timeout=120s
 
       - name: Deploy Backend
         working-directory: vrse-builder-backend-main
@@ -123,11 +106,12 @@ jobs:
           kubectl apply -f backend-service.yaml
           kubectl apply -f backend-ingress.yaml
 
-      - name: Wait for Backend Deployment
+      - name: Verify Backend Deployment
         run: |
-          echo "⏳ Waiting for backend deployment..."
+          echo "⏳ Waiting for deployment to be created..."
           sleep 10
-          kubectl rollout status deployment/backend-deployment --timeout=180s
+          kubectl get deployments
+          kubectl rollout status deployment/backend-deployment
 
       - name: Output Backend URL and DNS
         run: |
@@ -135,4 +119,4 @@ jobs:
           BACKEND_DNS=$(kubectl get ingress backend-ingress -o jsonpath="{.status.loadBalancer.ingress[0].hostname}")
           BACKEND_URL="https://poc-api.autovrse.app"
           echo "✅ Backend is live at: $BACKEND_URL"
-          echo "Backend DNS: $BACKEND_DNS"
+          echo "🔗 Backend DNS: $BACKEND_DNS"

@@ -158,3 +158,10 @@ jobs:
              | head -n 1)
           echo "📄 Backend logs from $POD:"
           kubectl logs "$POD" -c backend --tail=50
+
+        # ✅ Print Final Backend URL
+      - name: ✅ Deployment Complete - Print Backend URL
+        run: |
+          echo "🎉 Backend successfully deployed!"
+          echo "🔗 Access your backend here: https://poc-api.autovrse.app"
+

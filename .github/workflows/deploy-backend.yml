@@ -19,12 +19,18 @@ jobs:
 
       - name: Install eksctl and kubectl
         run: |
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz" | tar xz -C /tmp
+          # Install eksctl
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz" -o eksctl.tar.gz
+          tar -xzf eksctl.tar.gz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin
+          eksctl version
 
+          # Install kubectl
           curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
+          kubectl version --client
+
 
       - name: Login to Amazon ECR
         id: login-ecr

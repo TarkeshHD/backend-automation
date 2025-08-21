@@ -4,9 +4,8 @@ metadata:
   name: backend-service
 spec:
   selector:
-    app: backend     # must match the pod label
+    app: backend
   ports:
     - protocol: TCP
-      port: 80         # the port other services & ingress use
-      targetPort: 3000 # the container port
-  type: ClusterIP
+      port: 80            # service port (used by Ingress and curl)
+      targetPort: 3000    # internal container port of your backend app

@@ -1,12 +1,15 @@
+# vrse-builder-backend-main/backend-service.yaml
 apiVersion: v1
 kind: Service
 metadata:
   name: backend-service
+  labels:
+    app: backend
 spec:
+  type: ClusterIP
   selector:
     app: backend
   ports:
-    - protocol: TCP
-      port: 80
-      targetPort: 5000
-  type: ClusterIP
+    - name: http
+      port: 80           # Service port exposed to Ingress
+      targetPort: 3000   # <-- change to your container's port

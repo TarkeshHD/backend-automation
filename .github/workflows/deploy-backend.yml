@@ -1,28 +1,22 @@
-name: Deploy Backend and MongoDB to EKS
+name: Deploy Backend to EKS with HTTPS (Let's Encrypt)
 
 on:
   workflow_dispatch:
 
 jobs:
-  deploy-backend:
+  deploy:
     runs-on: ubuntu-latest
 
     env:
-      # Common envs
       REPO_NAME: backend
-      SERVICE_NAME: backend-service
-      DEPLOYMENT_NAME: backend-deployment
       BACKEND_CONTEXT_DIR: vrse-builder-backend-main
       BACKEND_DOCKERFILE: vrse-builder-backend-main/Dockerfile
-      BACKEND_TARGET_PORT: "3000" # containerPort in your Deployment
-      SERVICE_PORT: "80"          # ClusterIP service port exposed to Ingress
+      BACKEND_TARGET_PORT: "3000"
       APP_HOST: poc-api.autovrse.app
 
     steps:
-      # ✅ Checkout repository
       - uses: actions/checkout@v3
 
-      # ✅ Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -30,141 +24,48 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ Install eksctl, kubectl, and Helm
-      - name: Install eksctl, kubectl, and Helm
+      - name: Install CLIs (kubectl, eksctl, helm)
         run: |
-          # eksctl
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
-
-          # kubectl
+          curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" \
+            | tar xz -C /tmp && sudo mv /tmp/eksctl /usr/local/bin
           curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
-
-          # helm
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
           curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-      # ✅ Login to Amazon ECR
-      - name: Login to Amazon ECR
+      - name: Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Auto-create ECR repo if not exists
-      - name: Create ECR Repository if not exists
+      - name: Build and Push Docker Image
         run: |
-          if ! aws ecr describe-repositories --repository-names "$REPO_NAME" >/dev/null 2>&1; then
-            echo "Creating ECR repository: $REPO_NAME"
-            aws ecr create-repository --repository-name "$REPO_NAME" >/dev/null
-          else
-            echo "ECR repository $REPO_NAME already exists."
-          fi
-
-      # ✅ Build and Push Backend Docker image
-      - name: Build and Push Backend Docker image
-        run: |
-          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/${REPO_NAME}"
+          IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          echo "Building backend image: $BACKEND_IMAGE:$TAG"
+          docker build -f "$BACKEND_DOCKERFILE" -t "$IMAGE:$TAG" -t "$IMAGE:latest" "$BACKEND_CONTEXT_DIR"
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:latest"
 
-          docker build -f "$BACKEND_DOCKERFILE" \
-            -t "$BACKEND_IMAGE:$TAG" \
-            -t "$BACKEND_IMAGE:latest" \
-            "$BACKEND_CONTEXT_DIR"
-          docker push "$BACKEND_IMAGE:$TAG"
-          docker push "$BACKEND_IMAGE:latest"
-
-      # ✅ Ensure EKS Cluster exists (create if missing via eksctl)
-      - name: Ensure EKS Cluster
-        env:
-          CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
-          REGION: ${{ secrets.AWS_REGION }}
+      - name: Setup kubeconfig
         run: |
-          STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
-          echo "🔍 Checking EKS cluster..."
-          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "✅ Cluster $CLUSTER_NAME exists."
-          elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-            echo "⚠️ Stack $STACK_NAME exists. Skipping creation."
-          else
-            echo "🚀 Creating new EKS cluster: $CLUSTER_NAME..."
-            eksctl create cluster \
-              --name "$CLUSTER_NAME" \
-              --region "$REGION" \
-              --nodegroup-name standard-workers \
-              --node-type t3.medium \
-              --nodes 2 \
-              --nodes-min 1 \
-              --nodes-max 3 \
-              --managed
-          fi
+          aws eks update-kubeconfig --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
 
-      # ✅ Generate kubeconfig
-      - name: Generate kubeconfig
-        env:
-          CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
-          REGION: ${{ secrets.AWS_REGION }}
+      # ✅ Install NGINX Ingress Controller
+      - name: Install NGINX Ingress Controller
         run: |
-          echo "⌛ Waiting for cluster to be active..."
-          aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/aws/deploy.yaml
+          kubectl rollout status deployment ingress-nginx-controller -n ingress-nginx --timeout=180s
 
-          echo "🔑 Updating kubeconfig..."
-          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
-
-      # 🧰 Optional: Install/Upgrade AWS Load Balancer Controller (ALB Ingress)
-      # Uses ALB_CONTROLLER_ROLE_ARN if provided (IRSA). If not provided but controller exists, it will skip.
-      - name: Ensure AWS Load Balancer Controller
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
-          ALB_CONTROLLER_ROLE_ARN: ${{ secrets.ALB_CONTROLLER_ROLE_ARN }}
+      # ✅ Install cert-manager
+      - name: Install cert-manager
         run: |
-          helm repo add eks https://aws.github.io/eks-charts
-          helm repo update
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.2/cert-manager.yaml
+          kubectl rollout status deployment cert-manager -n cert-manager --timeout=180s
 
-          # Detect existing installation
-          if kubectl get deployment -n kube-system aws-load-balancer-controller >/dev/null 2>&1; then
-            echo "ALB Controller already installed. Upgrading to ensure latest chart values..."
-            if [ -n "$ALB_CONTROLLER_ROLE_ARN" ]; then
-              helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller \
-                -n kube-system \
-                --set clusterName="${EKS_CLUSTER_NAME}" \
-                --set region="${AWS_REGION}" \
-                --set vpcId="$(aws eks describe-cluster --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.resourcesVpcConfig.vpcId' --output text)" \
-                --set serviceAccount.create=false \
-                --set serviceAccount.name=aws-load-balancer-controller \
-                --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${ALB_CONTROLLER_ROLE_ARN}"
-            else
-              helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller \
-                -n kube-system \
-                --set clusterName="${EKS_CLUSTERNAME}" \
-                --set region="${AWS_REGION}" \
-                --set vpcId="$(aws eks describe-cluster --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.resourcesVpcConfig.vpcId' --output text)" \
-                --set serviceAccount.create=false \
-                --set serviceAccount.name=aws-load-balancer-controller || true
-            fi
-          else
-            echo "Installing ALB Controller..."
-            if [ -n "$ALB_CONTROLLER_ROLE_ARN" ]; then
-              helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
-                -n kube-system \
-                --set clusterName="${EKS_CLUSTER_NAME}" \
-                --set region="${AWS_REGION}" \
-                --set vpcId="$(aws eks describe-cluster --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.resourcesVpcConfig.vpcId' --output text)" \
-                --set serviceAccount.create=true \
-                --set serviceAccount.name=aws-load-balancer-controller \
-                --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${ALB_CONTROLLER_ROLE_ARN}"
-            else
-              echo "⚠️ Skipping new installation because ALB_CONTROLLER_ROLE_ARN is not set. Assuming controller/IRSA already configured."
-            fi
-          fi
+      # ✅ Create Let's Encrypt ClusterIssuer
+      - name: Apply ClusterIssuer
+        working-directory: ${{ env.BACKEND_CONTEXT_DIR }}
+        run: kubectl apply -f cluster-issuer.yaml
 
-          # Wait for controller (if present) to be Ready
-          if kubectl get deployment -n kube-system aws-load-balancer-controller >/dev/null 2>&1; then
-            kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=180s
-          fi
-
-      # ✅ Deploy MongoDB bits (PVC, Deployment, Service, PDB, RBAC)
+      # ✅ Deploy MongoDB
       - name: Deploy MongoDB
         working-directory: ${{ env.BACKEND_CONTEXT_DIR }}
         run: |
@@ -174,91 +75,37 @@ jobs:
           kubectl apply -f mongodb-poddisruptionbudget.yaml
           kubectl apply -f rbac-restrict-delete.yaml
 
-      # ✅ Deploy/Update Backend (image pinned to current commit)
+      # ✅ Deploy Backend (replace image)
       - name: Deploy Backend
         working-directory: ${{ env.BACKEND_CONTEXT_DIR }}
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          BACKEND_IMAGE="${ECR_REGISTRY}/${REPO_NAME}"
+          IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
-
-          # Update image line in Deployment (expects a single 'image:' line for backend container)
-          sed -i "s|image: .*|image: ${BACKEND_IMAGE}:${TAG}|" backend-deployment.yaml
-
-          # Ensure Service exposes port 80 -> targetPort container port
-          if ! grep -q "port: ${SERVICE_PORT}" backend-service.yaml; then
-            echo "⚠️ Ensure backend-service.yaml exposes port ${SERVICE_PORT}"
-          fi
-          if ! grep -q "targetPort: ${BACKEND_TARGET_PORT}" backend-service.yaml; then
-            echo "⚠️ Ensure backend-service.yaml targetPort matches containerPort ${BACKEND_TARGET_PORT}"
-          fi
-
+          sed -i "s|image: .*|image: $IMAGE:$TAG|" backend-deployment.yaml
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
-      # ✅ Create/Apply ALB Ingress for HTTPS + custom domain
-      - name: Deploy Ingress (ALB)
+      # ✅ Apply Ingress with cert-manager annotations
+      - name: Deploy Ingress
         working-directory: ${{ env.BACKEND_CONTEXT_DIR }}
-        env:
-          ACM_CERT_ARN: ${{ secrets.ACM_CERT_ARN }}
-          APP_HOST: ${{ env.APP_HOST }}
-        run: |
-          cat > backend-ingress.yaml <<'YAML'
-          apiVersion: networking.k8s.io/v1
-          kind: Ingress
-          metadata:
-            name: backend-ingress
-            annotations:
-              kubernetes.io/ingress.class: alb
-              alb.ingress.kubernetes.io/scheme: internet-facing
-              alb.ingress.kubernetes.io/target-type: ip
-              alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
-              alb.ingress.kubernetes.io/ssl-redirect: '443'
-              alb.ingress.kubernetes.io/certificate-arn: ${ACM_CERT_ARN}
-              alb.ingress.kubernetes.io/healthcheck-path: /health
-              alb.ingress.kubernetes.io/backend-protocol: HTTP
-          spec:
-            rules:
-              - host: ${APP_HOST}
-                http:
-                  paths:
-                    - path: /
-                      pathType: Prefix
-                      backend:
-                        service:
-                          name: backend-service
-                          port:
-                            number: 80
-            tls:
-              - hosts:
-                  - ${APP_HOST}
-                secretName: dummy-not-used-by-alb
-          YAML
+        run: kubectl apply -f backend-ingress.yaml
 
-          # Inject env vars and apply
-          sed -e "s|\${ACM_CERT_ARN}|${ACM_CERT_ARN}|g" \
-              -e "s|\${APP_HOST}|${APP_HOST}|g" backend-ingress.yaml | kubectl apply -f -
-
-      # ✅ Wait for Backend rollout
-      - name: Verify Backend Rollout
+      # ✅ Wait for Deployment
+      - name: Wait for Rollout
         run: |
-          kubectl rollout status deployment/${DEPLOYMENT_NAME} --timeout=180s
+          kubectl rollout status deployment/backend-deployment --timeout=180s
 
-      # ✅ Output the ALB hostname (create CNAME: poc-api.autovrse.app -> <ALB DNS>)
-      - name: Show Ingress Hostname
-        env:
-          INGRESS_NAME: backend-ingress
+      # ✅ HTTPS Smoke Test
+      - name: HTTPS Test
         run: |
-          echo "Waiting for Ingress to get an address..."
           for i in {1..30}; do
-            HOSTNAME=$(kubectl get ingress ${INGRESS_NAME} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            if [ -n "$HOSTNAME" ]; then
-              echo "ALB Hostname: $HOSTNAME"
-              echo "➡️  Configure DNS CNAME: ${APP_HOST} -> $HOSTNAME"
+            code=$(curl -s -o /dev/null -w "%{http_code}" https://poc-api.autovrse.app/health || true)
+            echo "Attempt $i → HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "✅ Healthy"
               exit 0
             fi
-            sleep 10
+            sleep 5
           done
-          echo "Ingress did not get a hostname in time." && kubectl get ingress ${INGRESS_NAME} -o yaml && exit 1
+          echo "❌ HTTPS check failed"
+          exit 1

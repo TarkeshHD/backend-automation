@@ -100,7 +100,7 @@ jobs:
         run: |
           kubectl apply -f mongodb-pvc.yaml
 
-      # ✅ Deploy Backend (includes MongoDB container)
+      # ✅ Deploy Backend + MongoDB
       - name: Deploy Backend and MongoDB
         working-directory: vrse-builder-backend-main
         run: |
@@ -111,8 +111,33 @@ jobs:
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
+      # ✅ Install NGINX Ingress Controller
+      - name: Install NGINX Ingress Controller
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/aws/deploy.yaml
+          echo "⌛ Waiting for ingress controller to be ready..."
+          kubectl rollout status deployment ingress-nginx-controller -n ingress-nginx --timeout=180s
 
-      # ✅ Show Pod status
+      # ✅ Install cert-manager
+      - name: Install cert-manager
+        run: |
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+          echo "⌛ Waiting for cert-manager deployments to be ready..."
+          kubectl rollout status deployment cert-manager -n cert-manager --timeout=180s
+          kubectl rollout status deployment cert-manager-webhook -n cert-manager --timeout=180s
+          kubectl rollout status deployment cert-manager-cainjector -n cert-manager --timeout=180s
+
+      # ✅ Apply ClusterIssuer for Let's Encrypt
+      - name: Apply ClusterIssuer
+        working-directory: vrse-builder-backend-main
+        run: kubectl apply -f cluster-issuer.yaml
+
+      # ✅ Apply Ingress Resource for HTTPS domain
+      - name: Apply Backend Ingress
+        working-directory: vrse-builder-backend-main
+        run: kubectl apply -f backend-ingress.yaml
+
+      # ✅ Show Pod Status
       - name: Show Pod Status
         run: |
           echo "📦 Pod Status:"
@@ -125,11 +150,11 @@ jobs:
           kubectl get pods -l app=backend -o jsonpath='{.items[*].spec.containers[*].name}'
           echo ""
 
+      # ✅ Backend Container Logs
       - name: Backend Container Logs
         run: |
           POD=$(kubectl get pods -l app=backend \
             -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' \
              | head -n 1)
-           echo "📄 Backend logs from $POD:"
-           kubectl logs "$POD" -c backend --tail=50
-
+          echo "📄 Backend logs from $POD:"
+          kubectl logs "$POD" -c backend --tail=50

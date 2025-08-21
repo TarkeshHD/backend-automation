@@ -8,10 +8,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repository
+      # ✅ Checkout repo
       - uses: actions/checkout@v3
 
-      # ✅ Setup AWS Credentials
+      # ✅ Configure AWS
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -28,12 +28,12 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      # ✅ Login to Amazon ECR
+      # ✅ Login to ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Auto-create ECR repo if not exists
+      # ✅ Create ECR Repo if not exists
       - name: Create ECR Repository if not exists
         run: |
           REPO_NAME="backend"
@@ -44,7 +44,7 @@ jobs:
             echo "ECR repository $REPO_NAME already exists."
           fi
 
-      # ✅ Build and Push Backend Docker image
+      # ✅ Build & Push Docker image
       - name: Build and Push Backend Docker image
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
@@ -58,7 +58,7 @@ jobs:
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
-      # ✅ Ensure EKS Cluster exists
+      # ✅ Ensure EKS Cluster
       - name: Ensure EKS Cluster
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
@@ -97,7 +97,7 @@ jobs:
             --name "$CLUSTER_NAME" \
             --region "$REGION"
 
-      # ✅ Install Ingress via Helm, cert-manager via kubectl
+      # ✅ Install Ingress and cert-manager
       - name: Setup Ingress and cert-manager
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
@@ -108,10 +108,9 @@ jobs:
           helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
             --namespace ingress-nginx --create-namespace
 
-          # Install cert-manager using kubectl to avoid Helm ownership conflict
           kubectl apply --validate=false -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
 
-      # ✅ Apply HTTPS ClusterIssuer and Ingress
+      # ✅ Apply HTTPS Configs
       - name: Apply HTTPS ClusterIssuer and Ingress
         working-directory: vrse-builder-backend-main
         run: |
@@ -136,11 +135,13 @@ jobs:
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
 
-          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
+          # SAFELY replace image line
+          sed -i "s|\(image: \).*|\1$BACKEND_IMAGE:$TAG|" backend-deployment.yaml
+
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
-      # ✅ Verify rollout
+      # ✅ Rollout Check
       - name: Verify Deployment
         run: |
           kubectl rollout status deployment/backend-deployment

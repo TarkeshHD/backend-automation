@@ -8,8 +8,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ✅ Checkout the code
       - uses: actions/checkout@v3
 
+      # ✅ Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -17,6 +19,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # ✅ Install eksctl and kubectl
       - name: Install eksctl and kubectl
         run: |
           curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
@@ -25,37 +28,40 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
+      # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # ✅ Create ECR repo if not exists
       - name: Create ECR Repository if not exists
         run: |
-          set -euo pipefail
           REPO_NAME="backend"
           if ! aws ecr describe-repositories --repository-names "$REPO_NAME" >/dev/null 2>&1; then
             echo "Creating ECR repository: $REPO_NAME"
-            aws ecr create-repository --repository-name "$REPO_NAME" >/dev/null
+            aws ecr create-repository --repository-name "$REPO_NAME"
           else
             echo "ECR repository $REPO_NAME already exists."
           fi
 
+      # ✅ Build and Push Docker image
       - name: Build and Push Backend Docker image
         run: |
-          set -euo pipefail
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
           echo "Building backend image: $BACKEND_IMAGE:$TAG"
+
           docker build -f vrse-builder-backend-main/Dockerfile \
             -t "$BACKEND_IMAGE:$TAG" \
             -t "$BACKEND_IMAGE:latest" \
             ./vrse-builder-backend-main
+
           docker push "$BACKEND_IMAGE:$TAG"
           docker push "$BACKEND_IMAGE:latest"
 
+      # ✅ Ensure EKS Cluster exists
       - name: Ensure EKS Cluster
         run: |
-          set -euo pipefail
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
           STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
@@ -78,9 +84,9 @@ jobs:
               --managed
           fi
 
+      # ✅ Generate kubeconfig
       - name: Generate kubeconfig
         run: |
-          set -euo pipefail
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
           echo "⌛ Waiting for cluster to be active..."
@@ -88,15 +94,16 @@ jobs:
           echo "🔑 Updating kubeconfig..."
           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
 
+      # ✅ Apply MongoDB PVC
       - name: Deploy MongoDB Persistent Volume Claim
         working-directory: vrse-builder-backend-main
         run: |
           kubectl apply -f mongodb-pvc.yaml
 
-      - name: Deploy Backend (includes MongoDB container)
+      # ✅ Deploy Backend (includes MongoDB container)
+      - name: Deploy Backend and MongoDB
         working-directory: vrse-builder-backend-main
         run: |
-          set -euo pipefail
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
           echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
@@ -104,19 +111,28 @@ jobs:
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
-      - name: Verify Deployment Rollout
-        run: |
-          kubectl rollout status deployment/backend-deployment
-
+      # ✅ Wait for Pod to be ready
       - name: Wait for Pod Ready
         run: |
+          echo "⌛ Waiting for pod to become ready..."
           kubectl wait --for=condition=ready pod -l app=backend --timeout=180s
 
+      # ✅ Show Pod status
       - name: Show Pod Status
         run: |
-          echo "📦 Current Pod Status:"
+          echo "📦 Pod Status:"
           kubectl get pods -l app=backend -o wide
+
+      # ✅ Show Container Names
+      - name: List Pod Containers
+        run: |
+          echo "📋 Containers in backend pod:"
+          kubectl get pods -l app=backend -o jsonpath='{.items[*].spec.containers[*].name}'
           echo ""
-          echo "🔎 Describe (first pod):"
+
+      # ✅ Show Backend Logs
+      - name: Backend Container Logs
+        run: |
           POD=$(kubectl get pods -l app=backend -o jsonpath='{.items[0].metadata.name}')
-          kubectl describe pod "$POD" | tail -n 100
+          echo "📄 Backend logs from $POD:"
+          kubectl logs "$POD" -c backend --tail=50

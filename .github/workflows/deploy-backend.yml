@@ -111,11 +111,6 @@ jobs:
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
-      # ✅ Wait for Pod to be ready
-      - name: Wait for Pod Ready
-        run: |
-          echo "⌛ Waiting for pod to become ready..."
-          kubectl wait --for=condition=ready pod -l app=backend --timeout=180s
 
       # ✅ Show Pod status
       - name: Show Pod Status

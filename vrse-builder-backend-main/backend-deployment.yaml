@@ -16,6 +16,6 @@ spec:
     spec:
       containers:
         - name: backend
-          image: dummy-placeholder
+          image: 133354030153.dkr.ecr.us-east-1.amazonaws.com/backend
           ports:
             - containerPort: 3000

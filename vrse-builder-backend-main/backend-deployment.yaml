@@ -18,4 +18,4 @@ spec:
         - name: backend
           image: 133354030153.dkr.ecr.us-east-1.amazonaws.com/backend
           ports:
-            - containerPort: 3000
+            - containerPort: 5000

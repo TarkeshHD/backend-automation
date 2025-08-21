@@ -1,18 +1,16 @@
-# vrse-builder-backend-main/backend-ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: backend-ingress
   annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
-    alb.ingress.kubernetes.io/ssl-redirect: '443'
-    alb.ingress.kubernetes.io/certificate-arn: ${ACM_CERT_ARN}
-    alb.ingress.kubernetes.io/healthcheck-path: /health
-    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
 spec:
+  tls:
+    - hosts:
+        - poc-api.autovrse.app
+      secretName: backend-tls
   rules:
     - host: poc-api.autovrse.app
       http:
@@ -24,7 +22,3 @@ spec:
                 name: backend-service
                 port:
                   number: 80
-  tls:
-    - hosts:
-        - poc-api.autovrse.app
-      secretName: dummy-not-used-by-alb

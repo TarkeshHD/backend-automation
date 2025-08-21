@@ -123,7 +123,7 @@ const main = () => {
   try {
     // connectToDB(DB);
 
-    const server = app.listen(PORT,'0.0.0.0', async () => {
+    const server = app.listen(PORT, async () => {
       logger.info('Server connected to port : ' + PORT),
         logger.info('Environment ' + process.env.NODE_ENV);
       logger.info('DB URL : ' + DB.url);

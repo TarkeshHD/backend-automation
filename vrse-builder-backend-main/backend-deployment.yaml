@@ -20,14 +20,28 @@ spec:
           ports:
             - containerPort: 3000
           env:
-            - name: MONGO_URL
-              value: mongodb://admin:admin@mongodb:27017
             - name: NODE_ENV
               value: production
             - name: PORT
               value: "3000"
-            - name: JWT_SECRET
-              value: your_test_secret_key
+            - name: APP_DOMAIN
+              value: "poc-api.autovrse.app"
+            - name: WEB_DOMAIN
+              value: "https://poc.autovrse-training.com/"         # ✅ Update this to your actual frontend domain
+            - name: APP_JWT_KEY
+              value: "test-jwt-secret"                   # ✅ Use a real secure secret in production
+            - name: JWT_KEY_FOR_INVITE
+              value: "invite-jwt-secret"
+            - name: MONGODB_USER
+              value: admin
+            - name: MONGODB_PASSWORD
+              value: admin
+            - name: MONGODB_HOST
+              value: mongodb
+            - name: MONGODB_PORT
+              value: "27017"
+            - name: MONGODB_DB_NAME
+              value: vrse
 
         - name: mongodb
           image: mongo:6.0

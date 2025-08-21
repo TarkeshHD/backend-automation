@@ -52,7 +52,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # Ensure default VPC and a default subnet exist
+    # Ensure default VPC and subnet
     - name: Ensure default VPC and default subnet
       id: ensure-default
       run: |
@@ -74,7 +74,7 @@ jobs:
         echo "DEFAULT_VPC_ID=$DEFAULT_VPC_ID" >> $GITHUB_OUTPUT
         echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_OUTPUT
 
-    # IAM Role for EC2
+    # IAM Role
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role
       run: |
@@ -93,22 +93,16 @@ jobs:
         if ! aws iam get-role --role-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
           aws iam create-role \
             --role-name ${{ env.EC2_ROLE_NAME }} \
-            --assume-role-policy-document file://ec2-trust-policy.json \
-            --description "IAM role for EC2 instances to work with CodeDeploy"
+            --assume-role-policy-document file://ec2-trust-policy.json
           aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
           aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/AmazonEC2RoleforAWSCodeDeploy
         fi
         if ! aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
           aws iam create-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }}
         fi
-        ATTACHED_ROLE=$(aws iam get-instance-profile \
-          --instance-profile-name ${{ env.EC2_ROLE_NAME }} \
-          --query 'InstanceProfile.Roles[0].RoleName' \
-          --output text 2>/dev/null || echo "None")
+        ATTACHED_ROLE=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Roles[0].RoleName' --output text 2>/dev/null || echo "None")
         if [ "$ATTACHED_ROLE" != "${{ env.EC2_ROLE_NAME }}" ]; then
-          aws iam add-role-to-instance-profile \
-            --instance-profile-name ${{ env.EC2_ROLE_NAME }} \
-            --role-name ${{ env.EC2_ROLE_NAME }}
+          aws iam add-role-to-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --role-name ${{ env.EC2_ROLE_NAME }}
         fi
         PROFILE_ARN=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Arn' --output text)
         echo "PROFILE_ARN=$PROFILE_ARN" >> $GITHUB_OUTPUT
@@ -154,7 +148,6 @@ jobs:
         name: ec2-private-key
         path: ${{ steps.create-key.outputs.KEY_NAME }}.pem
 
-    # Get Ubuntu AMI
     - name: Get Latest Ubuntu AMI
       id: get-ami
       run: |
@@ -165,7 +158,6 @@ jobs:
           --output text)
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
-    # Launch EC2 Instance (cloud-init + app stack)
     - name: Launch EC2 Instance
       id: launch-instance
       env:
@@ -174,26 +166,48 @@ jobs:
         DOMAIN_NAME: ${{ github.event.inputs.domain_name }}
         EMAIL: ${{ github.event.inputs.email }}
       run: |
-        cat > user-data.sh << EOF
+        cat > user-data.sh << 'EOF'
         #!/bin/bash
 
-        # Persist environment variables
-        echo 'export ENV_VAR1="val1"' | sudo tee -a /etc/profile
-        echo 'export ENV_VAR2="val2"' | sudo tee -a /etc/profile
-        # Persist AWS_REGION for convenience (detect from instance metadata)
-        if ! grep -q 'export AWS_REGION=' /etc/profile; then
-          REGION_DETECTED=\$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep region | awk -F\" '{print \$4}')
-          echo "export AWS_REGION=\"\$REGION_DETECTED\"" | sudo tee -a /etc/profile
-        fi
+        # Environment Variables
+        cat <<'ENVVARS' | sudo tee -a /etc/profile
+        export PORT=5000
+        export NODE_ENV=production
+        export DB_SSL_CA_FILE=global-bundle.pem
+        export APP_JWT_KEY=3D37bUIX9I3a5g8jE1
+        export JWT_KEY_FOR_INVITE=3D37bUIX9I3a5gLo012
+        export WEB_DOMAIN=https://vrsebuilder-demo.autovrse-training.com
+        export APP_DOMAIN=https://api.demo-app.vrse-builder.autovrse.app
+        export SEND_IN_BLUE_USER=devops.admin@autovrse-training.com
+        export SEND_IN_BLUE_KEY=b3H2MdyBfrAtg7xD
+        export EMAIL_SENDER=noreply@autovrse-training.com
+        export PRODUCT_ADMIN_USERNAME=admin@autovrse.in
+        export PRODUCT_ADMIN_PASSWORD=admin
+        export PRODUCT_ADMIN_EMAIL=kaushal.panchal@autovrse.in
+        export APP_DB=mongodb://localhost:27017/vrseBuilder
+        export MONGODB_USER=admin
+        export MONGODB_PASSWORD=admin
+        export MONGODB_HOST=localhost
+        export MONGODB_PORT=27017
+        export MONGODB_DB_NAME=vrseBuilder
+        export ZENDESK_API_TOKEN=random
+        export NODE_EMAIL_PASS=Loy186481
+        export NODE_EMAIL_USER=no-reply@autovrse.in
+        export DASHBOARD_URL=https://vrsebuilder-demo.autovrse-training.com
+        ENVVARS
+
+        # Detect and persist region
+        REGION_DETECTED=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region)
+        echo "export AWS_REGION=$REGION_DETECTED" | sudo tee -a /etc/profile
         source /etc/profile
 
+        # Install dependencies
         sudo apt-get update -y
         sudo apt-get install -y ruby wget curl gnupg git nginx software-properties-common jq
 
-        # CodeDeploy Agent (region-aware)
+        # CodeDeploy Agent
         cd /home/ubuntu
-        REGION=\$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region)
-        wget "https://aws-codedeploy-\${REGION}.s3.\${REGION}.amazonaws.com/latest/install"
+        wget "https://aws-codedeploy-${REGION_DETECTED}.s3.${REGION_DETECTED}.amazonaws.com/latest/install"
         chmod +x ./install
         ./install auto
         sudo systemctl enable codedeploy-agent
@@ -203,7 +217,7 @@ jobs:
         curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
         sudo apt-get install -y nodejs
 
-        # MongoDB 7.0
+        # MongoDB
         curl -fsSL https://pgp.mongodb.com/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
         echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
         sudo apt-get update -y
@@ -211,7 +225,6 @@ jobs:
         sudo systemctl enable mongod
         sudo systemctl start mongod
         sleep 10
-
         mongosh <<EOF2
         use admin
         db.createUser({user: "admin", pwd: "admin", roles: ["userAdminAnyDatabase", "dbAdminAnyDatabase", "readWriteAnyDatabase"]});
@@ -221,24 +234,19 @@ jobs:
         sudo sed -i '/#security:/a\security:\n  authorization: "enabled"' /etc/mongod.conf
         sudo systemctl restart mongod
 
-        # Clone repo
-        GH_USER="${GH_USERNAME}"
-        GH_TOKEN="${GH_PAT}"
-        REPO_NAME="your-repository"
-        BRANCH="main"
-        sudo git clone -b "\$BRANCH" "https://\${GH_USER}:\${GH_TOKEN}@github.com/\${GH_USER}/\${REPO_NAME}.git"
-        sudo chown -R ubuntu:ubuntu "\$REPO_NAME"
-
-        cd "/home/ubuntu/\${REPO_NAME}"
+        # Clone App
+        git clone -b main https://${GH_USERNAME}:${GH_PAT}@github.com/${GH_USERNAME}/your-repository.git
+        cd your-repository
         npm install
 
         # PM2
         sudo npm install -g pm2
-        pm2 start server.js --name "my-app" --update-env
+        source /etc/profile
+        pm2 start server.js --name "my-app" --env production --update-env
         pm2 startup systemd -u ubuntu --hp /home/ubuntu
         pm2 save
 
-        # Nginx with HTTPS redirect
+        # Nginx + HTTPS
         sudo bash -c "cat > /etc/nginx/sites-available/default" <<NGINXCONF
         server {
             listen 80;
@@ -248,7 +256,6 @@ jobs:
         server {
             listen 443 ssl;
             server_name ${DOMAIN_NAME};
-            client_max_body_size 30M;
 
             ssl_certificate /etc/letsencrypt/live/${DOMAIN_NAME}/fullchain.pem;
             ssl_certificate_key /etc/letsencrypt/live/${DOMAIN_NAME}/privkey.pem;
@@ -268,7 +275,7 @@ jobs:
         NGINXCONF
         sudo nginx -t && sudo systemctl restart nginx
 
-        # SSL Certbot
+        # Certbot
         sudo add-apt-repository -y ppa:certbot/certbot
         sudo apt-get update -y
         sudo apt-get install -y python3-certbot-nginx
@@ -289,10 +296,8 @@ jobs:
           --query 'Instances[0].InstanceId' \
           --output text)
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
-
         aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 
-    # Allocate & associate Elastic IP
     - name: Allocate Elastic IP
       id: allocate-eip
       run: |
@@ -300,16 +305,13 @@ jobs:
         PUBLIC_IP=$(aws ec2 describe-addresses --allocation-ids "$ALLOC_ID" --query 'Addresses[0].PublicIp' --output text)
         echo "ALLOCATION_ID=$ALLOC_ID" >> $GITHUB_OUTPUT
         echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
-        echo "Allocated Elastic IP: $PUBLIC_IP (AllocationId: $ALLOC_ID)"
+        echo "Allocated Elastic IP: $PUBLIC_IP"
 
     - name: Associate Elastic IP to Instance
-      id: associate-eip
       run: |
-        ASSOC_ID=$(aws ec2 associate-address \
+        aws ec2 associate-address \
           --instance-id "${{ steps.launch-instance.outputs.INSTANCE_ID }}" \
-          --allocation-id "${{ steps.allocate-eip.outputs.ALLOCATION_ID }}" \
-          --query 'AssociationId' --output text)
-        echo "AssociationId: $ASSOC_ID"
+          --allocation-id "${{ steps.allocate-eip.outputs.ALLOCATION_ID }}"
 
     - name: Summarize Outputs
       run: |

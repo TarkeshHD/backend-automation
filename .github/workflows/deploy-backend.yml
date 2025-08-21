@@ -81,14 +81,36 @@ jobs:
           aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
 
-      - name: Deploy MongoDB
+      - name: Deploy MongoDB and wait for PVC to bind
         working-directory: vrse-builder-backend-main
         run: |
           kubectl apply -f mongodb-pvc.yaml
+
+          echo "⏳ Waiting for MongoDB PVC to bind..."
+          for i in {1..12}; do
+            STATUS=$(kubectl get pvc mongodb-pvc -o jsonpath='{.status.phase}')
+            echo "Current status: $STATUS"
+            if [ "$STATUS" == "Bound" ]; then
+              echo "✅ PVC bound successfully."
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$STATUS" != "Bound" ]; then
+            echo "❌ PVC did not bind in time."
+            exit 1
+          fi
+
           kubectl apply -f mongodb-deployment.yaml
           kubectl apply -f mongodb-service.yaml
           kubectl apply -f mongodb-poddisruptionbudget.yaml
           kubectl apply -f rbac-restrict-delete.yaml
+
+      - name: Wait for MongoDB to be Ready
+        run: |
+          echo "Waiting for MongoDB rollout to complete..."
+          kubectl rollout status deployment/mongodb --timeout=120s
 
       - name: Deploy Backend
         working-directory: vrse-builder-backend-main
@@ -101,14 +123,13 @@ jobs:
           kubectl apply -f backend-service.yaml
           kubectl apply -f backend-ingress.yaml
 
-      - name: Verify Backend Deployment
+      - name: Wait for Backend Deployment
         run: |
-          echo "⏳ Waiting for deployment to be created..."
+          echo "⏳ Waiting for backend deployment..."
           sleep 10
-          kubectl get deployments
-          kubectl rollout status deployment/backend-deployment
+          kubectl rollout status deployment/backend-deployment --timeout=180s
 
-      - name: Output Backend URL
+      - name: Output Backend URL and DNS
         run: |
           echo "Fetching Backend LoadBalancer DNS..."
           BACKEND_DNS=$(kubectl get ingress backend-ingress -o jsonpath="{.status.loadBalancer.ingress[0].hostname}")

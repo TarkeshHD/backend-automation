@@ -139,6 +139,16 @@ const main = () => {
       //     format: winston.format.json(),
       //   }),
       // );
+
+
+      try {
+        logger.info('🛠️ Connecting to MongoDB...');
+        await connectToDB();
+        logger.info('✅ MongoDB connection established!');
+      } catch (err) {
+        logger.error('❌ Failed to connect to MongoDB: ' + err.message);
+        return;
+      }
       logger.info('Database connected');
 
       // After Connection Create Required Users

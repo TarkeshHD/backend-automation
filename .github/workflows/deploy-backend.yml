@@ -19,16 +19,16 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ Install eksctl and kubectl
       - name: Install eksctl and kubectl
         run: |
-          curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz"
-          tar -xzf eksctl_$(uname -s)_amd64.tar.gz -C /tmp
+          curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
+          tar -xzf eksctl_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin
 
           curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
+
 
       # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR

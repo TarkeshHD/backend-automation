@@ -6,8 +6,7 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 uploads/
-public/
-configuration.json
+
 
 
 # Diagnostic reports (https://nodejs.org/api/report.html)

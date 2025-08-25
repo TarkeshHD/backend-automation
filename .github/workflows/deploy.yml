@@ -175,7 +175,7 @@ jobs:
             --key-name ${{ env.KEY_NAME }} \
             --security-group-ids ${{ env.SG_ID }} \
             --subnet-id ${{ env.SUBNET_ID }} \
-            --iam-instance-profile Name=$EC2_ROLE_NAME \
+            --iam-instance-profile Name=${{ env.EC2_ROLE_NAME }} \
             --user-data file://user-data.sh \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}}]" \
             --query 'Instances[0].InstanceId' \

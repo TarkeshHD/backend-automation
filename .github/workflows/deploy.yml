@@ -34,7 +34,6 @@ on:
 env:
   AWS_REGION: us-east-1
   EC2_ROLE_NAME: EC2-CodeDeploy-Role
-  CODEDEPLOY_ROLE_NAME: CodeDeploy-Service-Role
   SECURITY_GROUP_NAME: CodeDeploy-Security-Group
 
 jobs:
@@ -51,78 +50,32 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Create EC2 IAM Role and Instance Profile
-      id: ec2-role
+    - name: Get Default VPC and Subnet
+      id: get-network
       run: |
-        cat > ec2-trust-policy.json << EOF
-        {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Principal": { "Service": "ec2.amazonaws.com" },
-              "Action": "sts:AssumeRole"
-            }
-          ]
-        }
-        EOF
-        if ! aws iam get-role --role-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
-          aws iam create-role \
-            --role-name ${{ env.EC2_ROLE_NAME }} \
-            --assume-role-policy-document file://ec2-trust-policy.json \
-            --description "IAM role for EC2 instances to work with CodeDeploy"
-          aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-          aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/AmazonEC2RoleforAWSCodeDeploy
-        fi
-        if ! aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
-          aws iam create-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }}
-        fi
-        ATTACHED_ROLE=$(aws iam get-instance-profile \
-          --instance-profile-name ${{ env.EC2_ROLE_NAME }} \
-          --query 'InstanceProfile.Roles[0].RoleName' \
-          --output text 2>/dev/null || echo "None")
-        if [ "$ATTACHED_ROLE" != "${{ env.EC2_ROLE_NAME }}" ]; then
-          aws iam add-role-to-instance-profile \
-            --instance-profile-name ${{ env.EC2_ROLE_NAME }} \
-            --role-name ${{ env.EC2_ROLE_NAME }}
-        fi
-        PROFILE_ARN=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Arn' --output text)
-        echo "PROFILE_ARN=$PROFILE_ARN" >> $GITHUB_OUTPUT
+        VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
+        SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[0].SubnetId' --output text)
+        echo "VPC_ID=$VPC_ID" >> $GITHUB_OUTPUT
+        echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_OUTPUT
 
     - name: Create Security Group
       id: create-sg
       run: |
-        VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
-        EXISTING_SG=$(aws ec2 describe-security-groups \
-          --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" \
-          --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
-        if [ "$EXISTING_SG" != "None" ] && [ "$EXISTING_SG" != "" ]; then
-          echo "SECURITY_GROUP_ID=$EXISTING_SG" >> $GITHUB_OUTPUT
-        else
-          SG_ID=$(aws ec2 create-security-group \
-            --group-name ${{ env.SECURITY_GROUP_NAME }} \
-            --description "SG for CodeDeploy" \
-            --vpc-id $VPC_ID \
-            --query 'GroupId' --output text)
-          for PORT in 22 80 443 27017; do
-            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port $PORT --cidr 0.0.0.0/0
-          done
-          echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
-        fi
+        SG_ID=$(aws ec2 create-security-group --group-name ${{ env.SECURITY_GROUP_NAME }} --description "Allow web traffic" --vpc-id ${{ steps.get-network.outputs.VPC_ID }} --output text)
+        for PORT in 22 80 443 27017; do
+          aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port $PORT --cidr 0.0.0.0/0
+        done
+        echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
 
     - name: Create EC2 Key Pair
       id: create-key
       run: |
-        KEY_NAME="${{ github.event.inputs.client_name }}-key-$(date +%s)"
-        aws ec2 create-key-pair \
-          --key-name "$KEY_NAME" \
-          --query 'KeyMaterial' \
-          --output text > "$KEY_NAME.pem"
+        KEY_NAME="${{ github.event.inputs.client_name }}-key"
+        aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$KEY_NAME.pem"
         chmod 400 "$KEY_NAME.pem"
         echo "KEY_NAME=$KEY_NAME" >> $GITHUB_OUTPUT
-      shell: bash
 
-    - name: Upload Private Key Artifact
+    - name: Upload Private Key
       uses: actions/upload-artifact@v4
       with:
         name: ec2-private-key
@@ -139,20 +92,20 @@ jobs:
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
     - name: Launch EC2 Instance
-      id: launch-instance
       env:
-        GH_USERNAME: ${{ secrets.GH_USERNAME }}
-        GH_PAT: ${{ secrets.GH_PAT }}
         DOMAIN_NAME: ${{ github.event.inputs.domain_name }}
         EMAIL: ${{ github.event.inputs.email }}
       run: |
-        SUBNET_ID=$(aws ec2 describe-subnets \
-          --filters "Name=vpc-id,Values=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)" \
-          --query "Subnets[0].SubnetId" \
-          --output text)
-
-        # Save user-data.sh and add your provisioning logic inside here
-        echo "Provisioning logic for EC2 instance setup goes here" > user-data.sh
+        cat > user-data.sh <<EOF
+        #!/bin/bash
+        sudo apt update -y
+        sudo apt install -y nginx nodejs npm mongodb
+        sudo systemctl start nginx
+        sudo systemctl enable nginx
+        sudo systemctl start mongod
+        sudo systemctl enable mongod
+        # App setup placeholder
+        EOF
 
         INSTANCE_ID=$(aws ec2 run-instances \
           --image-id ${{ steps.get-ami.outputs.AMI_ID }} \
@@ -160,12 +113,13 @@ jobs:
           --instance-type ${{ github.event.inputs.instance_type }} \
           --key-name ${{ steps.create-key.outputs.KEY_NAME }} \
           --security-group-ids ${{ steps.create-sg.outputs.SECURITY_GROUP_ID }} \
-          --subnet-id $SUBNET_ID \
-          --iam-instance-profile Arn=${{ steps.ec2-role.outputs.PROFILE_ARN }} \
+          --subnet-id ${{ steps.get-network.outputs.SUBNET_ID }} \
           --user-data file://user-data.sh \
-          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}},{Key=Environment,Value=Development},{Key=Project,Value=CodeDeploy}]" \
-          --query 'Instances[0].InstanceId' \
-          --output text)
+          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}}]" \
+          --query 'Instances[0].InstanceId' --output text)
 
-        echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
+        echo "EC2 instance launched with ID: $INSTANCE_ID"
         aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+
+        PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+        echo "Public IP: $PUBLIC_IP"

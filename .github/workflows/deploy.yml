@@ -12,11 +12,7 @@ on:
         required: true
         default: 't3.micro'
         type: choice
-        options:
-          - t3.micro
-          - t3.small
-          - t3.medium
-          - t3.large
+        options: [t3.micro, t3.small, t3.medium, t3.large]
       instance_name:
         description: 'EC2 Instance Name Tag'
         required: true
@@ -52,26 +48,21 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Ensure default VPC and subnet
+    - name: Ensure default VPC and Subnet
       id: ensure-default
       run: |
         set -e
-        export AWS_REGION=${{ env.AWS_REGION }}
-
         VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
         if [ "$VPC_ID" = "None" ]; then
-           echo "❌ No default VPC found in region $AWS_REGION"
-           exit 1
+          echo "❌ No default VPC found."
+          exit 1
         fi
 
         SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[0].SubnetId' --output text)
         if [ "$SUBNET_ID" = "None" ]; then
-           echo "❌ No subnet found in VPC $VPC_ID"
-           exit 1
+          echo "❌ No subnet found in VPC $VPC_ID"
+          exit 1
         fi
-
-        echo "✅ Default VPC: $VPC_ID"
-        echo "✅ Subnet ID: $SUBNET_ID"
 
         echo "DEFAULT_VPC_ID=$VPC_ID" >> $GITHUB_OUTPUT
         echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_OUTPUT
@@ -81,13 +72,11 @@ jobs:
       run: |
         echo '{
           "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Principal": { "Service": "ec2.amazonaws.com" },
-              "Action": "sts:AssumeRole"
-            }
-          ]
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": "ec2.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }]
         }' > trust-policy.json
 
         if ! aws iam get-role --role-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
@@ -130,7 +119,7 @@ jobs:
       run: |
         KEY_NAME="${{ github.event.inputs.client_name }}-key"
         if aws ec2 describe-key-pairs --key-names "$KEY_NAME" >/dev/null 2>&1; then
-          echo "Key pair $KEY_NAME already exists. Skipping creation."
+          echo "Key pair $KEY_NAME already exists. Skipping."
         else
           aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$KEY_NAME.pem"
           chmod 400 "$KEY_NAME.pem"
@@ -154,10 +143,7 @@ jobs:
 
     - name: Create User Data Script
       run: |
-        DOMAIN_NAME="${{ github.event.inputs.domain_name }}"
-        EMAIL="${{ github.event.inputs.email }}"
-
-        cat <<EOF > user-data.sh
+        cat << 'EOF' > user-data.sh
 #!/bin/bash
 apt update -y
 apt install -y nginx certbot python3-certbot-nginx nodejs npm git mongodb jq
@@ -165,6 +151,7 @@ apt install -y nginx certbot python3-certbot-nginx nodejs npm git mongodb jq
 systemctl enable mongod
 systemctl start mongod
 sleep 10
+
 mongosh <<MONGO
 use admin
 db.createUser({user:"admin", pwd:"admin", roles:["root"]})
@@ -181,7 +168,7 @@ pm2 start server.js --name app
 pm2 save
 pm2 startup systemd
 
-certbot --nginx --non-interactive --agree-tos -d \$DOMAIN_NAME -m \$EMAIL
+certbot --nginx --non-interactive --agree-tos -d ${{ github.event.inputs.domain_name }} -m ${{ github.event.inputs.email }}
 EOF
 
     - name: Launch EC2 Instance
@@ -206,6 +193,7 @@ EOF
       run: |
         ALLOC_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
         PUBLIC_IP=$(aws ec2 describe-addresses --allocation-ids $ALLOC_ID --query 'Addresses[0].PublicIp' --output text)
+
         aws ec2 associate-address \
           --instance-id ${{ steps.launch-ec2.outputs.INSTANCE_ID }} \
           --allocation-id $ALLOC_ID

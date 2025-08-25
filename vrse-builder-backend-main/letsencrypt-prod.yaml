@@ -1,3 +1,4 @@
+# letsencrypt-prod.yaml
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -5,11 +6,7 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-<<<<<<< HEAD
-    email: tarkesh@autovrse.in
-=======
-    email: tarkesh@gmail.com
->>>>>>> 19a7cee3dd0f4a25f8b8b028ef329d9c5d9da81e
+    email: your@email.com
     privateKeySecretRef:
       name: letsencrypt-prod
     solvers:

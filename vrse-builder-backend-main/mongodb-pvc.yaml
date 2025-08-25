@@ -8,3 +8,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
+<<<<<<< HEAD
+=======
+  volumeName: mongodb-pv
+>>>>>>> 19a7cee3dd0f4a25f8b8b028ef329d9c5d9da81e

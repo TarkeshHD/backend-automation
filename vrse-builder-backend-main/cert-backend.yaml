@@ -1,0 +1,13 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: backend-tls
+  namespace: default
+spec:
+  secretName: backend-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  commonName: poc-api.autovrse.app
+  dnsNames:
+  - poc-api.autovrse.app

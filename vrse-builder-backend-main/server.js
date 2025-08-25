@@ -123,7 +123,11 @@ const main = () => {
   try {
     // connectToDB(DB);
 
+<<<<<<< HEAD
     const server = app.listen(PORT, async () => {
+=======
+    const server = app.listen(PORT, '0.0.0.0', async () => {
+>>>>>>> 19a7cee3dd0f4a25f8b8b028ef329d9c5d9da81e
       logger.info('Server connected to port : ' + PORT),
         logger.info('Environment ' + process.env.NODE_ENV);
       logger.info('DB URL : ' + DB.url);
@@ -139,6 +143,19 @@ const main = () => {
       //     format: winston.format.json(),
       //   }),
       // );
+<<<<<<< HEAD
+=======
+
+
+      try {
+        logger.info('🛠️ Connecting to MongoDB...');
+        await connectToDB();
+        logger.info('✅ MongoDB connection established!');
+      } catch (err) {
+        logger.error('❌ Failed to connect to MongoDB: ' + err.message);
+        return;
+      }
+>>>>>>> 19a7cee3dd0f4a25f8b8b028ef329d9c5d9da81e
       logger.info('Database connected');
 
       // After Connection Create Required Users

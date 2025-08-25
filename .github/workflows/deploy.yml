@@ -88,19 +88,26 @@ jobs:
         PROFILE_ARN=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Arn' --output text)
         echo "PROFILE_ARN=$PROFILE_ARN" >> $GITHUB_OUTPUT
 
-    - name: Create Security Group
+    - name: Create or Use Existing Security Group
       id: create-sg
       run: |
         VPC_ID="${{ steps.ensure-default.outputs.DEFAULT_VPC_ID }}"
-        SG_ID=$(aws ec2 create-security-group \
-          --group-name ${{ env.SECURITY_GROUP_NAME }} \
-          --description "Security group for CodeDeploy" \
-          --vpc-id $VPC_ID \
-          --query 'GroupId' --output text)
+        SG_ID=$(aws ec2 describe-security-groups \
+          --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" "Name=vpc-id,Values=$VPC_ID" \
+          --query "SecurityGroups[0].GroupId" --output text)
 
-        for PORT in 22 80 443 27017; do
-          aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port $PORT --cidr 0.0.0.0/0
-        done
+        if [ "$SG_ID" = "None" ]; then
+          SG_ID=$(aws ec2 create-security-group \
+            --group-name ${{ env.SECURITY_GROUP_NAME }} \
+            --description "Security group for CodeDeploy" \
+            --vpc-id $VPC_ID \
+            --query 'GroupId' --output text)
+
+          for PORT in 22 80 443 27017; do
+            aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port $PORT --cidr 0.0.0.0/0 || true
+          done
+        fi
+
         echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
 
     - name: Create EC2 Key Pair

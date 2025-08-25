@@ -1,4 +1,3 @@
-# vrse-builder-backend-main/dashboard-admin.yaml
 apiVersion: v1
 kind: ServiceAccount
 metadata:

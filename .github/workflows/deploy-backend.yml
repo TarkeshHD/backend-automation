@@ -19,6 +19,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # ✅ Install eksctl and kubectl
       - name: Install eksctl and kubectl
         run: |
           echo "📦 Installing eksctl..."
@@ -28,10 +29,12 @@ jobs:
           eksctl version
 
           echo "📦 Installing kubectl..."
-          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          KUBECTL_VERSION=$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)
+          curl -LO "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
-           kubectl version --client
+          kubectl version --client
+
 
 
       # ✅ Login to Amazon ECR

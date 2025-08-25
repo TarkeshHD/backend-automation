@@ -78,6 +78,11 @@ jobs:
          echo "DEFAULT_VPC_ID=$VPC_ID" >> $GITHUB_OUTPUT
          echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_OUTPUT
 
+    - name: Debug Subnets
+      run: |
+       aws ec2 describe-subnets --query 'Subnets[*].{ID:SubnetId,VPC:VpcId,AZ:AvailabilityZone}' --output table
+
+
 
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role

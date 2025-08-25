@@ -1,4 +1,4 @@
-name: Deploy Backend and MongoDB to EKS with Dashboard + AWS Auth
+name: Deploy Backend and MongoDB to EKS
 
 on:
   workflow_dispatch:
@@ -7,129 +7,104 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    env:
-      AWS_REGION: us-east-1
-      EKS_CLUSTER_NAME: Backend-cluster
-      DOMAIN_NAME: poc-api.autovrse.app
-      ECR_REPO_NAME: backend
-      IMAGE_TAG: latest
-
     steps:
-    # ✅ Checkout Code
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      # ✅ Checkout Code
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v3
 
-    # ✅ Configure AWS credentials
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      # ✅ Configure AWS Credentials
+      - name: 🔐 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    # ✅ Install eksctl & kubectl
-    - name: Install eksctl & kubectl
-      run: |
-        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_linux_amd64.tar.gz" | tar xz -C /tmp
-        sudo mv /tmp/eksctl /usr/local/bin
+      # ✅ Install eksctl and kubectl
+      - name: 🧰 Install eksctl and kubectl
+        run: |
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" --output eksctl.tar.gz
+          tar -xzf eksctl.tar.gz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
 
-        curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        chmod +x kubectl
-        sudo mv kubectl /usr/local/bin/
+          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
-    # ✅ ECR Login
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      # ✅ Update kubeconfig for EKS
+      - name: 📡 Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ secrets.AWS_REGION }} \
+            --name ${{ secrets.EKS_CLUSTER_NAME }}
 
-    # ✅ Create ECR Repo if not exists
-    - name: Ensure ECR Repo
-      run: |
-        if ! aws ecr describe-repositories --repository-names "$ECR_REPO_NAME" > /dev/null 2>&1; then
-          aws ecr create-repository --repository-name "$ECR_REPO_NAME"
-        fi
+      # ✅ Login to ECR & Build/Push Image
+      - name: 🐳 Login to ECR and Build Image
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin 133354030153.dkr.ecr.us-east-1.amazonaws.com
+          
+          docker build -f vrse-builder-backend-main/Dockerfile -t backend .
+          docker tag backend:latest 133354030153.dkr.ecr.us-east-1.amazonaws.com/backend:latest
+          docker push 133354030153.dkr.ecr.us-east-1.amazonaws.com/backend:latest
 
-    # ✅ Build and Push Docker Image
-    - name: Build and Push Docker Image
-      run: |
-        IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/$ECR_REPO_NAME:$IMAGE_TAG"
-        docker build -t "$IMAGE_URI" ./vrse-builder-backend-main
-        docker push "$IMAGE_URI"
+      # ✅ Deploy Backend and MongoDB
+      - name: ⚙️ Apply Backend + MongoDB YAMLs
+        working-directory: vrse-builder-backend-main
+        run: |
+          kubectl apply -f mongodb-pvc.yaml
+          kubectl apply -f backend-deployment.yaml
+          kubectl apply -f backend-service.yaml
 
-    # ✅ Setup kubeconfig for EKS
-    - name: Update kubeconfig
-      run: |
-        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+      # ✅ Install NGINX Ingress
+      - name: 🌐 Install NGINX Ingress
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/aws/deploy.yaml
+          kubectl rollout status deployment ingress-nginx-controller -n ingress-nginx --timeout=180s
 
-    # ✅ Deploy MongoDB PVC and Backend
-    - name: Deploy MongoDB and Backend
-      working-directory: vrse-builder-backend-main
-      run: |
-        kubectl apply -f mongodb-pvc.yaml
-        sed -i "s|image: .*|image: ${{ steps.login-ecr.outputs.registry }}/$ECR_REPO_NAME:$IMAGE_TAG|" backend-deployment.yaml
-        kubectl apply -f backend-deployment.yaml
-        kubectl apply -f backend-service.yaml
+      # ✅ Install cert-manager
+      - name: 🔐 Install cert-manager
+        run: |
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+          kubectl rollout status deployment cert-manager -n cert-manager --timeout=180s
+          kubectl rollout status deployment cert-manager-webhook -n cert-manager --timeout=180s
+          kubectl rollout status deployment cert-manager-cainjector -n cert-manager --timeout=180s
 
-    # ✅ Install NGINX Ingress
-    - name: Install NGINX Ingress Controller
-      run: |
-        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/aws/deploy.yaml
-        kubectl rollout status deployment ingress-nginx-controller -n ingress-nginx --timeout=180s
+      # ✅ Apply ClusterIssuer for Let's Encrypt
+      - name: 📜 Apply ClusterIssuer
+        working-directory: vrse-builder-backend-main
+        run: kubectl apply -f cluster-issuer.yaml
 
-    # ✅ Install cert-manager
-    - name: Install cert-manager
-      run: |
-        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-        kubectl rollout status deployment cert-manager -n cert-manager --timeout=180s
-        kubectl rollout status deployment cert-manager-webhook -n cert-manager --timeout=180s
-        kubectl rollout status deployment cert-manager-cainjector -n cert-manager --timeout=180s
+      # ✅ Apply Ingress for HTTPS
+      - name: 🔁 Apply Backend Ingress
+        working-directory: vrse-builder-backend-main
+        run: kubectl apply -f backend-ingress.yaml
 
-    # ✅ Apply ClusterIssuer
-    - name: Apply ClusterIssuer
-      working-directory: vrse-builder-backend-main
-      run: kubectl apply -f cluster-issuer.yaml
+      # ✅ Deploy Kubernetes Dashboard
+      - name: 📊 Deploy Kubernetes Dashboard
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
 
-    # ✅ Apply Ingress Resource for Backend
-    - name: Apply Backend Ingress
-      working-directory: vrse-builder-backend-main
-      run: kubectl apply -f backend-ingress.yaml
+      # ✅ Apply dashboard-admin.yaml
+      - name: 🛡️ Apply Dashboard Admin Access
+        working-directory: vrse-builder-backend-main
+        run: kubectl apply -f dashboard-admin.yaml
 
-    # ✅ Apply AWS Auth (RBAC for IAM Users)
-    - name: Apply aws-auth ConfigMap
-      working-directory: vrse-builder-backend-main
-      run: kubectl apply -f aws-auth.yaml
+      # ✅ Apply aws-auth.yaml (IAM to RBAC mapping)
+      - name: 🔧 Apply AWS Auth ConfigMap
+        working-directory: vrse-builder-backend-main
+        run: kubectl apply -f aws-auth.yaml
 
-    # ✅ Deploy Kubernetes Dashboard
-    - name: Deploy Kubernetes Dashboard
-      run: |
-        kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+      # ✅ Show Dashboard Token
+      - name: 🔑 Print Dashboard Login Token
+        run: |
+          echo "🔐 Dashboard Login Token:"
+          kubectl -n kubernetes-dashboard create token admin-user
 
-        cat <<EOF | kubectl apply -f -
-        apiVersion: v1
-        kind: ServiceAccount
-        metadata:
-          name: admin-user
-          namespace: kubernetes-dashboard
-        ---
-        apiVersion: rbac.authorization.k8s.io/v1
-        kind: ClusterRoleBinding
-        metadata:
-          name: admin-user
-        roleRef:
-          apiGroup: rbac.authorization.k8s.io
-          kind: ClusterRole
-          name: cluster-admin
-        subjects:
-        - kind: ServiceAccount
-          name: admin-user
-          namespace: kubernetes-dashboard
-        EOF
-
-    # ✅ Final Logs
-    - name: Done ✅
-      run: |
-        echo "🎉 Backend deployed at: https://$DOMAIN_NAME"
-        echo "📌 To access Kubernetes Dashboard:"
-        echo "1. Run: kubectl proxy"
-        echo "2. Open: http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"
-        echo "3. Run: kubectl -n kubernetes-dashboard create token admin-user"
+      # ✅ Show Dashboard Access Info
+      - name: 🌐 Dashboard Access Instructions
+        run: |
+          echo "✅ Kubernetes Dashboard is deployed."
+          echo "To access:"
+          echo "Run 'kubectl proxy' on your machine"
+          echo "Then open:"
+          echo "http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"

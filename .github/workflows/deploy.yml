@@ -117,8 +117,8 @@ jobs:
         aws ec2 create-key-pair \
           --key-name "$KEY_NAME" \
           --query 'KeyMaterial' \
-          --output text > "${KEY_NAME}.pem"
-        chmod 400 "${KEY_NAME}.pem"
+          --output text > "$KEY_NAME.pem"
+        chmod 400 "$KEY_NAME.pem"
         echo "KEY_NAME=$KEY_NAME" >> $GITHUB_OUTPUT
       shell: bash
 
@@ -146,100 +146,13 @@ jobs:
         DOMAIN_NAME: ${{ github.event.inputs.domain_name }}
         EMAIL: ${{ github.event.inputs.email }}
       run: |
-        cat > user-data.sh << 'EOF'
-        #!/bin/bash
+        SUBNET_ID=$(aws ec2 describe-subnets \
+          --filters "Name=vpc-id,Values=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)" \
+          --query "Subnets[0].SubnetId" \
+          --output text)
 
-        # Set environment variables
-        echo 'export ENV_VAR1="val1"' | sudo tee -a /etc/profile
-        echo 'export ENV_VAR2="val2"' | sudo tee -a /etc/profile
-        source /etc/profile
-
-        sudo apt-get update -y
-        sudo apt-get install -y ruby wget curl gnupg git nginx software-properties-common
-
-        # CodeDeploy Agent
-        cd /home/ubuntu
-        wget https://aws-codedeploy-${AWS_REGION}.s3.${AWS_REGION}.amazonaws.com/latest/install
-        chmod +x ./install
-        ./install auto
-        sudo service codedeploy-agent start
-
-        # Node.js
-        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-        sudo apt-get install -y nodejs
-
-        # MongoDB
-        curl -fsSL https://pgp.mongodb.com/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-        echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-        sudo apt-get update -y
-        sudo apt-get install -y mongodb-org
-        sudo systemctl enable mongod
-        sudo systemctl start mongod
-        sleep 10
-
-        mongosh <<EOF2
-        use admin
-        db.createUser({user: "admin", pwd: "admin", roles: ["userAdminAnyDatabase", "dbAdminAnyDatabase", "readWriteAnyDatabase"]});
-        use vrseBuilder
-        db.createUser({user: "admin", pwd: "admin", roles: ["userAdmin", "dbAdmin", "readWrite"]});
-        EOF2
-        sudo sed -i '/#security:/a\security:\n  authorization: "enabled"' /etc/mongod.conf
-        sudo systemctl restart mongod
-
-        # Clone repo
-        GH_USER="${GH_USERNAME}"
-        GH_TOKEN="${GH_PAT}"
-        REPO_NAME="your-repository"
-        BRANCH="main"
-        sudo git clone -b $BRANCH https://$GH_USER:$GH_TOKEN@github.com/$GH_USER/$REPO_NAME.git
-        sudo chown -R ubuntu:ubuntu $REPO_NAME
-
-        cd /home/ubuntu/$REPO_NAME
-        npm install
-
-        # PM2
-        sudo npm install -g pm2
-        pm2 start server.js --name "my-app" --update-env
-        pm2 startup systemd -u ubuntu --hp /home/ubuntu
-        pm2 save
-
-        # Nginx with HTTPS redirect
-        sudo bash -c "cat > /etc/nginx/sites-available/default" <<NGINXCONF
-        server {
-            listen 80;
-            server_name ${DOMAIN_NAME};
-            return 301 https://\$host\$request_uri;
-        }
-        server {
-            listen 443 ssl;
-            server_name ${DOMAIN_NAME};
-            client_max_body_size 30M;
-
-            ssl_certificate /etc/letsencrypt/live/${DOMAIN_NAME}/fullchain.pem;
-            ssl_certificate_key /etc/letsencrypt/live/${DOMAIN_NAME}/privkey.pem;
-
-            location / {
-                proxy_pass http://localhost:5000;
-                proxy_http_version 1.1;
-                proxy_set_header Upgrade \$http_upgrade;
-                proxy_set_header Connection 'upgrade';
-                proxy_set_header Host \$host;
-                proxy_cache_bypass \$http_upgrade;
-                proxy_set_header X-Real-IP \$remote_addr;
-                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto \$scheme;
-            }
-        }
-        NGINXCONF
-        sudo nginx -t && sudo systemctl restart nginx
-
-        # SSL Certbot
-        sudo add-apt-repository -y ppa:certbot/certbot
-        sudo apt-get update -y
-        sudo apt-get install -y python3-certbot-nginx
-        sudo certbot --nginx -d ${DOMAIN_NAME} --non-interactive --agree-tos -m ${EMAIL}
-        sudo certbot renew --dry-run
-        EOF
+        # Save user-data.sh and add your provisioning logic inside here
+        echo "Provisioning logic for EC2 instance setup goes here" > user-data.sh
 
         INSTANCE_ID=$(aws ec2 run-instances \
           --image-id ${{ steps.get-ami.outputs.AMI_ID }} \
@@ -247,10 +160,12 @@ jobs:
           --instance-type ${{ github.event.inputs.instance_type }} \
           --key-name ${{ steps.create-key.outputs.KEY_NAME }} \
           --security-group-ids ${{ steps.create-sg.outputs.SECURITY_GROUP_ID }} \
+          --subnet-id $SUBNET_ID \
           --iam-instance-profile Arn=${{ steps.ec2-role.outputs.PROFILE_ARN }} \
           --user-data file://user-data.sh \
           --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}},{Key=Environment,Value=Development},{Key=Project,Value=CodeDeploy}]" \
           --query 'Instances[0].InstanceId' \
           --output text)
+
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
         aws ec2 wait instance-running --instance-ids $INSTANCE_ID

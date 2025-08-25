@@ -82,12 +82,21 @@ jobs:
       - name: Create Security Group
         id: create-sg
         run: |
-          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
-          SG_ID=$(aws ec2 create-security-group --group-name ${{ env.SECURITY_GROUP_NAME }} --description "Allow SSH, HTTP, HTTPS, MongoDB" --vpc-id $VPC_ID --query 'GroupId' --output text)
-          for PORT in 22 80 443 27017; do
-            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port $PORT --cidr 0.0.0.0/0
-          done
-          echo "SG_ID=$SG_ID" >> $GITHUB_ENV
+          if [ "$EXISTING_SG" != "" ] && [ "$EXISTING_SG" != "None" ]; then
+            echo "Security group already exists: $EXISTING_SG"
+            echo "SECURITY_GROUP_ID=$EXISTING_SG" >> $GITHUB_OUTPUT
+          else
+            SG_ID=$(aws ec2 create-security-group \
+              --group-name ${{ env.SECURITY_GROUP_NAME }} \
+              --description "SG for CodeDeploy" \
+              --vpc-id $VPC_ID \
+              --query 'GroupId' --output text)
+            for PORT in 22 80 443 27017; do
+              aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port $PORT --cidr 0.0.0.0/0
+            done
+            echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
+          fi
+
 
       - name: Create Key Pair
         id: create-key

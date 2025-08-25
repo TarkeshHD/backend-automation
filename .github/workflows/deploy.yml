@@ -79,23 +79,53 @@ jobs:
             aws iam add-role-to-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --role-name ${{ env.EC2_ROLE_NAME }}
           fi
 
-      - name: Create Security Group
+      - name: Create Security Group (and VPC if missing)
         id: create-sg
         run: |
-          if [ "$EXISTING_SG" != "" ] && [ "$EXISTING_SG" != "None" ]; then
-            echo "Security group already exists: $EXISTING_SG"
+          # Try to get default VPC
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
+
+          # If no default VPC, create one
+          if [ "$VPC_ID" = "None" ] || [ -z "$VPC_ID" ]; then
+            echo "⚠️ No default VPC found, creating a new VPC..."
+            VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query 'Vpc.VpcId' --output text)
+            aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-support "{\"Value\":true}"
+            aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-hostnames "{\"Value\":true}"
+
+            # Create an Internet Gateway and attach to VPC
+            IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' --output text)
+            aws ec2 attach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID"
+
+           # Create a public subnet
+           SUBNET_ID=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block 10.0.1.0/24 --availability-zone ${{ env.AWS_REGION }}a --query 'Subnet.SubnetId' --output text)
+
+           # Create a route table and route to the Internet
+           RT_ID=$(aws ec2 create-route-table --vpc-id "$VPC_ID" --query 'RouteTable.RouteTableId' --output text)
+           aws ec2 create-route --route-table-id "$RT_ID" --destination-cidr-block 0.0.0.0/0 --gateway-id "$IGW_ID"
+           aws ec2 associate-route-table --subnet-id "$SUBNET_ID" --route-table-id "$RT_ID"
+          fi
+
+          echo "✅ Using VPC ID: $VPC_ID"
+
+          # Create or reuse security group
+          EXISTING_SG=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" \
+            --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
+
+          if [ "$EXISTING_SG" != "None" ] && [ -n "$EXISTING_SG" ]; then
             echo "SECURITY_GROUP_ID=$EXISTING_SG" >> $GITHUB_OUTPUT
           else
             SG_ID=$(aws ec2 create-security-group \
               --group-name ${{ env.SECURITY_GROUP_NAME }} \
               --description "SG for CodeDeploy" \
-              --vpc-id $VPC_ID \
+              --vpc-id "$VPC_ID" \
               --query 'GroupId' --output text)
             for PORT in 22 80 443 27017; do
-              aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port $PORT --cidr 0.0.0.0/0
+              aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port "$PORT" --cidr 0.0.0.0/0
             done
             echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
-          fi
+           fi
+
 
 
       - name: Create Key Pair

@@ -41,8 +41,9 @@ env:
 jobs:
   setup-infrastructure:
     runs-on: ubuntu-latest
+
     steps:
-    - name: Checkout code
+    - name: Checkout repo
       uses: actions/checkout@v4
 
     - name: Configure AWS credentials
@@ -52,7 +53,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Ensure default VPC and default subnet
+    - name: Ensure VPC and subnet
       id: ensure-default
       run: |
         DEFAULT_VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
@@ -72,10 +73,10 @@ jobs:
         echo "DEFAULT_VPC_ID=$DEFAULT_VPC_ID" >> $GITHUB_OUTPUT
         echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_OUTPUT
 
-    - name: Create EC2 IAM Role and Instance Profile
+    - name: Create IAM role and instance profile
       id: ec2-role
       run: |
-        cat > ec2-trust-policy.json << EOF
+        cat > ec2-trust-policy.json <<EOF
         {
           "Version": "2012-10-17",
           "Statement": [
@@ -87,20 +88,20 @@ jobs:
           ]
         }
         EOF
+
         if ! aws iam get-role --role-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
           aws iam create-role \
             --role-name ${{ env.EC2_ROLE_NAME }} \
             --assume-role-policy-document file://ec2-trust-policy.json
-          aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-          aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/AmazonEC2RoleforAWSCodeDeploy
+          aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess
         fi
+
         if ! aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
           aws iam create-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }}
         fi
-        ATTACHED_ROLE=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Roles[0].RoleName' --output text 2>/dev/null || echo "None")
-        if [ "$ATTACHED_ROLE" != "${{ env.EC2_ROLE_NAME }}" ]; then
-          aws iam add-role-to-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --role-name ${{ env.EC2_ROLE_NAME }}
-        fi
+
+        aws iam add-role-to-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --role-name ${{ env.EC2_ROLE_NAME }} || true
+
         PROFILE_ARN=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Arn' --output text)
         echo "PROFILE_ARN=$PROFILE_ARN" >> $GITHUB_OUTPUT
 
@@ -108,41 +109,33 @@ jobs:
       id: create-sg
       run: |
         VPC_ID="${{ steps.ensure-default.outputs.DEFAULT_VPC_ID }}"
-        EXISTING_SG=$(aws ec2 describe-security-groups \
-          --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" "Name=vpc-id,Values=$VPC_ID" \
-          --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
-        if [ "$EXISTING_SG" != "None" ]; then
-          echo "SECURITY_GROUP_ID=$EXISTING_SG" >> $GITHUB_OUTPUT
-        else
-          SG_ID=$(aws ec2 create-security-group \
-            --group-name ${{ env.SECURITY_GROUP_NAME }} \
-            --description "SG for CodeDeploy" \
-            --vpc-id $VPC_ID \
-            --query 'GroupId' --output text)
-          for PORT in 22 80 443 27017; do
-            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port $PORT --cidr 0.0.0.0/0
-          done
-          echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
-        fi
+        SG_ID=$(aws ec2 create-security-group \
+          --group-name ${{ env.SECURITY_GROUP_NAME }} \
+          --description "Allow 22 80 443 5000 3000" \
+          --vpc-id $VPC_ID --query 'GroupId' --output text)
 
-    - name: Create EC2 Key Pair
+        for PORT in 22 80 443 3000 5000; do
+          aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port $PORT --cidr 0.0.0.0/0
+        done
+
+        echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
+
+    - name: Create EC2 key pair
       id: create-key
       run: |
         KEY_NAME="${{ github.event.inputs.client_name }}-key-$(date +%s)"
-        aws ec2 create-key-pair \
-          --key-name "$KEY_NAME" \
-          --query 'KeyMaterial' \
-          --output text > "${KEY_NAME}.pem"
+        aws ec2 create-key-pair --key-name "$KEY_NAME" \
+          --query 'KeyMaterial' --output text > "${KEY_NAME}.pem"
         chmod 400 "${KEY_NAME}.pem"
         echo "KEY_NAME=$KEY_NAME" >> $GITHUB_OUTPUT
 
-    - name: Upload Private Key Artifact
+    - name: Upload private key
       uses: actions/upload-artifact@v4
       with:
         name: ec2-private-key
         path: ${{ steps.create-key.outputs.KEY_NAME }}.pem
 
-    - name: Get Latest Ubuntu AMI
+    - name: Get latest Ubuntu AMI
       id: get-ami
       run: |
         AMI_ID=$(aws ec2 describe-images \
@@ -152,26 +145,22 @@ jobs:
           --output text)
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
-    - name: Launch EC2 Instance
+    - name: Launch EC2 with NGINX and Environment
       id: launch-instance
-      env:
-        GH_USERNAME: ${{ secrets.GH_USERNAME }}
-        GH_PAT: ${{ secrets.GH_PAT }}
-        DOMAIN_NAME: ${{ github.event.inputs.domain_name }}
-        EMAIL: ${{ github.event.inputs.email }}
       run: |
-        cat > user-data.sh << 'EOF'
+        cat > user-data.sh <<EOF
         #!/bin/bash
+        apt update
+        apt install -y nginx
 
-        # Environment variables
-        cat <<'ENV' | sudo tee -a /etc/profile
+        cat <<'ENV' >> /etc/profile
         export PORT=5000
         export NODE_ENV=production
         export DB_SSL_CA_FILE=global-bundle.pem
         export APP_JWT_KEY=3D37bUIX9I3a5g8jE1
         export JWT_KEY_FOR_INVITE=3D37bUIX9I3a5gLo012
-        export WEB_DOMAIN=https://vrsebuilder-demo.autovrse-training.com
-        export APP_DOMAIN=https://api.demo-app.vrse-builder.autovrse.app
+        export WEB_DOMAIN=https://poc.autovrse-training.com
+        export APP_DOMAIN=https://poc-api.autovrse.app
         export SEND_IN_BLUE_USER=devops.admin@autovrse-training.com
         export SEND_IN_BLUE_KEY=b3H2MdyBfrAtg7xD
         export EMAIL_SENDER=noreply@autovrse-training.com
@@ -187,12 +176,35 @@ jobs:
         export ZENDESK_API_TOKEN=random
         export NODE_EMAIL_PASS=Loy186481
         export NODE_EMAIL_USER=no-reply@autovrse.in
-        export DASHBOARD_URL=https://vrsebuilder-demo.autovrse-training.com
+        export DASHBOARD_URL=https://poc.autovrse-training.com
         ENV
+
         source /etc/profile
 
-        # Setup: CodeDeploy, Node.js, MongoDB, PM2, Nginx, Certbot (as in previous steps)
-        # [Shortened here for brevity — see previous message or ask for full inline script]
+        tee /etc/nginx/sites-available/default > /dev/null <<'NGINX'
+        server {
+            listen 80 default_server;
+            listen [::]:80 default_server;
+
+            server_name ${{ github.event.inputs.domain_name }};
+            client_max_body_size 30M;
+
+            location / {
+                proxy_pass http://localhost:3000;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host $host;
+                proxy_cache_bypass $http_upgrade;
+
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+        }
+        NGINX
+
+        nginx -t && systemctl restart nginx
         EOF
 
         INSTANCE_ID=$(aws ec2 run-instances \
@@ -206,25 +218,22 @@ jobs:
           --user-data file://user-data.sh \
           --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}}]" \
           --query 'Instances[0].InstanceId' --output text)
+
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
         aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 
-    - name: Allocate Elastic IP
+    - name: Allocate and assign Elastic IP
       id: allocate-eip
       run: |
         ALLOC_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
         PUBLIC_IP=$(aws ec2 describe-addresses --allocation-ids "$ALLOC_ID" --query 'Addresses[0].PublicIp' --output text)
-        echo "ALLOCATION_ID=$ALLOC_ID" >> $GITHUB_OUTPUT
-        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
-
-    - name: Associate Elastic IP to Instance
-      run: |
         aws ec2 associate-address \
           --instance-id "${{ steps.launch-instance.outputs.INSTANCE_ID }}" \
-          --allocation-id "${{ steps.allocate-eip.outputs.ALLOCATION_ID }}"
+          --allocation-id "$ALLOC_ID"
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_OUTPUT
 
-    - name: Summarize Outputs
+    - name: Output Summary
       run: |
         echo "✅ Instance ID: ${{ steps.launch-instance.outputs.INSTANCE_ID }}"
-        echo "🌐 Elastic IP:  ${{ steps.allocate-eip.outputs.PUBLIC_IP }}"
-        echo "::notice title=Next Step::Create an A-record for '${{ github.event.inputs.domain_name }}' to point to ${{ steps.allocate-eip.outputs.PUBLIC_IP }}."
+        echo "🌐 Public IP:   ${{ steps.allocate-eip.outputs.PUBLIC_IP }}"
+        echo "::notice title=Next Step::Map '${{ github.event.inputs.domain_name }}' A-record to ${{ steps.allocate-eip.outputs.PUBLIC_IP }}"

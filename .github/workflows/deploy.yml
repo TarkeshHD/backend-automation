@@ -52,89 +52,69 @@ jobs:
 
       - name: Create EC2 IAM Role and Instance Profile
         run: |
-          cat > ec2-trust-policy.json <<EOF
-          {
+          echo '{
             "Version": "2012-10-17",
-            "Statement": [
-              {
-                "Effect": "Allow",
-                "Principal": { "Service": "ec2.amazonaws.com" },
-                "Action": "sts:AssumeRole"
-              }
-            ]
-          }
-          EOF
-          if ! aws iam get-role --role-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
-            aws iam create-role \
-              --role-name ${{ env.EC2_ROLE_NAME }} \
-              --assume-role-policy-document file://ec2-trust-policy.json
-            aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess
-            aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-          fi
-          if ! aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
-            aws iam create-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }}
-          fi
-          ATTACHED_ROLE=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Roles[0].RoleName' --output text 2>/dev/null || echo "None")
-          if [ "$ATTACHED_ROLE" != "${{ env.EC2_ROLE_NAME }}" ]; then
-            aws iam add-role-to-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --role-name ${{ env.EC2_ROLE_NAME }}
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": {"Service": "ec2.amazonaws.com"},
+              "Action": "sts:AssumeRole"
+            }]
+          }' > ec2-trust-policy.json
+
+          if ! aws iam get-role --role-name "$EC2_ROLE_NAME" >/dev/null 2>&1; then
+            aws iam create-role --role-name "$EC2_ROLE_NAME" --assume-role-policy-document file://ec2-trust-policy.json
+            aws iam attach-role-policy --role-name "$EC2_ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess
+            aws iam attach-role-policy --role-name "$EC2_ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
           fi
 
-      - name: Create Security Group (and VPC if missing)
-        id: create-sg
+          if ! aws iam get-instance-profile --instance-profile-name "$EC2_ROLE_NAME" >/dev/null 2>&1; then
+            aws iam create-instance-profile --instance-profile-name "$EC2_ROLE_NAME"
+          fi
+
+          ATTACHED_ROLE=$(aws iam get-instance-profile --instance-profile-name "$EC2_ROLE_NAME" --query 'InstanceProfile.Roles[0].RoleName' --output text 2>/dev/null || echo "None")
+          if [ "$ATTACHED_ROLE" != "$EC2_ROLE_NAME" ]; then
+            aws iam add-role-to-instance-profile --instance-profile-name "$EC2_ROLE_NAME" --role-name "$EC2_ROLE_NAME"
+          fi
+
+      - name: Create Security Group and Subnet
+        id: networking
         run: |
-          # Try to get default VPC
-          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
-
-          # If no default VPC, create one
+          VPC_ID=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
           if [ "$VPC_ID" = "None" ] || [ -z "$VPC_ID" ]; then
-            echo "⚠️ No default VPC found, creating a new VPC..."
             VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query 'Vpc.VpcId' --output text)
-            aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-support "{\"Value\":true}"
-            aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-hostnames "{\"Value\":true}"
+            aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-support '{"Value":true}'
+            aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-hostnames '{"Value":true}'
 
-            # Create an Internet Gateway and attach to VPC
             IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' --output text)
             aws ec2 attach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID"
 
-           # Create a public subnet
-           SUBNET_ID=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block 10.0.1.0/24 --availability-zone ${{ env.AWS_REGION }}a --query 'Subnet.SubnetId' --output text)
+            SUBNET_ID=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block 10.0.1.0/24 --availability-zone us-east-1a --query 'Subnet.SubnetId' --output text)
 
-           # Create a route table and route to the Internet
-           RT_ID=$(aws ec2 create-route-table --vpc-id "$VPC_ID" --query 'RouteTable.RouteTableId' --output text)
-           aws ec2 create-route --route-table-id "$RT_ID" --destination-cidr-block 0.0.0.0/0 --gateway-id "$IGW_ID"
-           aws ec2 associate-route-table --subnet-id "$SUBNET_ID" --route-table-id "$RT_ID"
+            RT_ID=$(aws ec2 create-route-table --vpc-id "$VPC_ID" --query 'RouteTable.RouteTableId' --output text)
+            aws ec2 create-route --route-table-id "$RT_ID" --destination-cidr-block 0.0.0.0/0 --gateway-id "$IGW_ID"
+            aws ec2 associate-route-table --subnet-id "$SUBNET_ID" --route-table-id "$RT_ID"
+          else
+            SUBNET_ID=$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$VPC_ID" --query 'Subnets[0].SubnetId' --output text)
           fi
 
-          echo "✅ Using VPC ID: $VPC_ID"
+          SG_ID=$(aws ec2 describe-security-groups --filters Name=group-name,Values=$SECURITY_GROUP_NAME --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "")
 
-          # Create or reuse security group
-          EXISTING_SG=$(aws ec2 describe-security-groups \
-            --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" \
-            --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
-
-          if [ "$EXISTING_SG" != "None" ] && [ -n "$EXISTING_SG" ]; then
-            echo "SECURITY_GROUP_ID=$EXISTING_SG" >> $GITHUB_OUTPUT
-          else
-            SG_ID=$(aws ec2 create-security-group \
-              --group-name ${{ env.SECURITY_GROUP_NAME }} \
-              --description "SG for CodeDeploy" \
-              --vpc-id "$VPC_ID" \
-              --query 'GroupId' --output text)
+          if [ -z "$SG_ID" ]; then
+            SG_ID=$(aws ec2 create-security-group --group-name "$SECURITY_GROUP_NAME" --description "SG for CodeDeploy" --vpc-id "$VPC_ID" --query 'GroupId' --output text)
             for PORT in 22 80 443 27017; do
               aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port "$PORT" --cidr 0.0.0.0/0
             done
-            echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
-           fi
+          fi
 
-
+          echo "SG_ID=$SG_ID" >> $GITHUB_ENV
+          echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_ENV
 
       - name: Create Key Pair
-        id: create-key
         run: |
-          KEY_NAME=${{ github.event.inputs.client_name }}-key-${{ github.run_id }}
+          KEY_NAME="${{ github.event.inputs.client_name }}-key-${{ github.run_id }}"
+          echo "KEY_NAME=$KEY_NAME" >> $GITHUB_ENV
           aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$KEY_NAME.pem"
           chmod 400 "$KEY_NAME.pem"
-          echo "KEY_NAME=$KEY_NAME" >> $GITHUB_ENV
 
       - name: Upload Key Pair Artifact
         uses: actions/upload-artifact@v4
@@ -143,53 +123,39 @@ jobs:
           path: ${{ env.KEY_NAME }}.pem
 
       - name: Get Latest Ubuntu AMI
-        id: get-ami
         run: |
           AMI_ID=$(aws ec2 describe-images --owners 099720109477 --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" --query 'Images|sort_by(@, &CreationDate)[-1].ImageId' --output text)
           echo "AMI_ID=$AMI_ID" >> $GITHUB_ENV
 
-      - name: Create EC2 Instance with NGINX + Certbot + App Setup
+      - name: Launch EC2 Instance
         run: |
           cat <<EOF > user-data.sh
           #!/bin/bash
           apt update -y
           apt install -y nginx nodejs npm mongodb curl software-properties-common
-
-          systemctl enable nginx
-          systemctl start nginx
-
-          systemctl enable mongod
-          systemctl start mongod
-
+          systemctl enable nginx && systemctl start nginx
+          systemctl enable mongod && systemctl start mongod
           add-apt-repository -y ppa:certbot/certbot
           apt update -y
           apt install -y certbot python3-certbot-nginx
-
           certbot --nginx --non-interactive --agree-tos --email ${{ github.event.inputs.email }} -d ${{ github.event.inputs.domain_name }}
-
           cd /home/ubuntu
           git clone https://github.com/${{ secrets.GH_USERNAME }}/your-repo-name.git
           cd your-repo-name
-          npm install
-          npm install -g pm2
+          npm install && npm install -g pm2
           pm2 start server.js --name "vrse-app"
-          pm2 save
-          pm2 startup systemd
-
+          pm2 save && pm2 startup systemd
           cat <<NGINX > /etc/nginx/sites-available/default
           server {
               listen 80;
               server_name ${{ github.event.inputs.domain_name }};
               return 301 https://\$host\$request_uri;
           }
-
           server {
               listen 443 ssl;
               server_name ${{ github.event.inputs.domain_name }};
-
               ssl_certificate /etc/letsencrypt/live/${{ github.event.inputs.domain_name }}/fullchain.pem;
               ssl_certificate_key /etc/letsencrypt/live/${{ github.event.inputs.domain_name }}/privkey.pem;
-
               location / {
                   proxy_pass http://localhost:3000;
                   proxy_http_version 1.1;
@@ -203,19 +169,18 @@ jobs:
           systemctl restart nginx
           EOF
 
-          chmod +x user-data.sh
-
           INSTANCE_ID=$(aws ec2 run-instances \
-            --image-id ${{ env.AMI_ID }} \
+            --image-id $AMI_ID \
             --instance-type ${{ github.event.inputs.instance_type }} \
             --key-name ${{ env.KEY_NAME }} \
             --security-group-ids ${{ env.SG_ID }} \
-            --iam-instance-profile Name=${{ env.EC2_ROLE_NAME }} \
+            --subnet-id ${{ env.SUBNET_ID }} \
+            --iam-instance-profile Name=$EC2_ROLE_NAME \
             --user-data file://user-data.sh \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}}]"
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}}]" \
             --query 'Instances[0].InstanceId' \
             --output text)
 
-          echo "Launched instance: \$INSTANCE_ID"
-          aws ec2 wait instance-running --instance-ids \$INSTANCE_ID
+          echo "Launched instance: $INSTANCE_ID"
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
           echo "✅ EC2 instance is now running."

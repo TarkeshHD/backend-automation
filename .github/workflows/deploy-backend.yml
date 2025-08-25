@@ -8,9 +8,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout repo
-      - name: Checkout code
-        uses: actions/checkout@v3
+      # ✅ Checkout the code
+      - uses: actions/checkout@v3
 
       # ✅ Configure AWS credentials
       - name: Configure AWS credentials
@@ -23,17 +22,18 @@ jobs:
       # ✅ Install eksctl and kubectl
       - name: Install eksctl and kubectl
         run: |
-          curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz"
-          tar -xzf eksctl_$(uname -s)_amd64.tar.gz -C /tmp && sudo mv /tmp/eksctl /usr/local/bin/
-          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin
+          curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
-      # ✅ Login to ECR
+      # ✅ Login to Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ✅ Create ECR repo if missing
+      # ✅ Create ECR Repository if not exists
       - name: Create ECR Repository if not exists
         run: |
           REPO_NAME="backend"
@@ -41,33 +41,55 @@ jobs:
             aws ecr create-repository --repository-name "$REPO_NAME"
           fi
 
-      # ✅ Build & Push Docker image
-      - name: Build and Push Docker Image
+      # ✅ Build and Push Docker image
+      - name: Build and Push Backend Docker image
         run: |
-          IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
+          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
+          docker build -f vrse-builder-backend-main/Dockerfile \
+            -t "$BACKEND_IMAGE:$TAG" \
+            -t "$BACKEND_IMAGE:latest" \
+            ./vrse-builder-backend-main
+          docker push "$BACKEND_IMAGE:$TAG"
+          docker push "$BACKEND_IMAGE:latest"
 
-          docker build -t "$IMAGE:$TAG" -t "$IMAGE:latest" ./vrse-builder-backend-main
-          docker push "$IMAGE:$TAG"
-          docker push "$IMAGE:latest"
-
-      # ✅ Update kubeconfig
-      - name: Update kubeconfig
+      # ✅ Ensure EKS Cluster
+      - name: Ensure EKS Cluster
         run: |
-          aws eks update-kubeconfig --region ${{ secrets.AWS_REGION }} --name ${{ secrets.EKS_CLUSTER_NAME }}
+          CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
+          REGION="${{ secrets.AWS_REGION }}"
+          STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
+          if ! aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1 && \
+             ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
+            eksctl create cluster \
+              --name "$CLUSTER_NAME" \
+              --region "$REGION" \
+              --nodegroup-name standard-workers \
+              --node-type t3.medium \
+              --nodes 2 \
+              --nodes-min 1 \
+              --nodes-max 3 \
+              --managed
+          fi
 
-      # ✅ Apply MongoDB PVC
+      # ✅ Generate kubeconfig
+      - name: Generate kubeconfig
+        run: |
+          aws eks wait cluster-active --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
+          aws eks update-kubeconfig --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
+
+      # ✅ Deploy MongoDB PVC
       - name: Deploy MongoDB Persistent Volume Claim
         working-directory: vrse-builder-backend-main
         run: kubectl apply -f mongodb-pvc.yaml
 
-      # ✅ Deploy Backend + MongoDB
+      # ✅ Deploy Backend and MongoDB
       - name: Deploy Backend and MongoDB
         working-directory: vrse-builder-backend-main
         run: |
-          IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
+          BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          sed -i "s|image: .*|image: $IMAGE:$TAG|" backend-deployment.yaml
+          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
 
@@ -77,8 +99,8 @@ jobs:
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/aws/deploy.yaml
           kubectl rollout status deployment ingress-nginx-controller -n ingress-nginx --timeout=180s
 
-      # ✅ Install Cert-Manager
-      - name: Install Cert-Manager
+      # ✅ Install cert-manager
+      - name: Install cert-manager
         run: |
           kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
           kubectl rollout status deployment cert-manager -n cert-manager --timeout=180s
@@ -86,46 +108,38 @@ jobs:
           kubectl rollout status deployment cert-manager-cainjector -n cert-manager --timeout=180s
 
       # ✅ Apply ClusterIssuer
-      - name: Apply ClusterIssuer for Let's Encrypt
+      - name: Apply ClusterIssuer
         working-directory: vrse-builder-backend-main
         run: kubectl apply -f cluster-issuer.yaml
 
-      # ✅ Apply Ingress for Backend HTTPS
-      - name: Apply Ingress Resource
+      # ✅ Apply Ingress Resource
+      - name: Apply Backend Ingress
         working-directory: vrse-builder-backend-main
         run: kubectl apply -f backend-ingress.yaml
 
-      # ✅ (Optional) Deploy Kubernetes Dashboard
+      # ✅ Deploy Kubernetes Dashboard
       - name: Deploy Kubernetes Dashboard
         run: |
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
-          cat <<EOF | kubectl apply -f -
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: admin-user
-            namespace: kubernetes-dashboard
-          ---
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: ClusterRoleBinding
-          metadata:
-            name: admin-user
-          roleRef:
-            apiGroup: rbac.authorization.k8s.io
-            kind: ClusterRole
-            name: cluster-admin
-          subjects:
-          - kind: ServiceAccount
-            name: admin-user
-            namespace: kubernetes-dashboard
-          EOF
+          kubectl apply -f vrse-builder-backend-main/dashboard-admin.yaml
 
-      # ✅ Show backend logs (useful for debugging)
-      - name: Show Backend Container Logs
+      # ✅ Show Pod Status
+      - name: Show Pod Status
+        run: kubectl get pods -o wide
+
+      # ✅ Show Backend Logs
+      - name: Backend Container Logs
         run: |
-          POD=$(kubectl get pods -l app=backend -o jsonpath='{.items[0].metadata.name}')
-          kubectl logs "$POD" -c backend --tail=100
+          POD=$(kubectl get pods -l app=backend \
+            -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' | head -n 1)
+          kubectl logs "$POD" -c backend --tail=50
 
-      # ✅ Print deployment success
-      - name: 🎉 Deployment Complete
-        run: echo "✅ Backend deployed at: https://poc-api.autovrse.app"
+      # ✅ Print Final Info
+      - name: ✅ Deployment Complete
+        run: |
+          echo "🎉 Backend successfully deployed!"
+          echo "🔗 Visit: https://poc-api.autovrse.app"
+          echo "🛡️  To access Dashboard:"
+          echo "    ➤ Run: kubectl proxy"
+          echo "    ➤ Open: http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"
+          echo "    ➤ Token: Run kubectl -n kubernetes-dashboard create token admin-user"

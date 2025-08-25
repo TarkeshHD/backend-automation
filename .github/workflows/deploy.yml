@@ -114,9 +114,14 @@ jobs:
       id: create-key
       run: |
         KEY_NAME="${{ github.event.inputs.client_name }}-key"
-        aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$KEY_NAME.pem"
-        chmod 400 "$KEY_NAME.pem"
+        if aws ec2 describe-key-pairs --key-names "$KEY_NAME" >/dev/null 2>&1; then
+          echo "Key pair $KEY_NAME already exists. Skipping creation."
+        else
+          aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$KEY_NAME.pem"
+          chmod 400 "$KEY_NAME.pem"
+        fi
         echo "KEY_NAME=$KEY_NAME" >> $GITHUB_OUTPUT
+
 
     - name: Upload Private Key
       uses: actions/upload-artifact@v4

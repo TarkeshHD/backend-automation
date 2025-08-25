@@ -38,10 +38,7 @@ jobs:
         run: |
           REPO_NAME="backend"
           if ! aws ecr describe-repositories --repository-names "$REPO_NAME" >/dev/null 2>&1; then
-            echo "Creating ECR repository: $REPO_NAME"
             aws ecr create-repository --repository-name "$REPO_NAME"
-          else
-            echo "ECR repository $REPO_NAME already exists."
           fi
 
       # ✅ Build and Push Docker image
@@ -49,7 +46,6 @@ jobs:
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          echo "Building backend image: $BACKEND_IMAGE:$TAG"
 
           docker build -f vrse-builder-backend-main/Dockerfile \
             -t "$BACKEND_IMAGE:$TAG" \
@@ -66,13 +62,11 @@ jobs:
           REGION="${{ secrets.AWS_REGION }}"
           STACK_NAME="eksctl-${CLUSTER_NAME}-cluster"
 
-          echo "🔍 Checking EKS cluster..."
           if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
             echo "✅ Cluster $CLUSTER_NAME exists."
           elif aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
             echo "⚠️ Stack $STACK_NAME exists. Skipping creation."
           else
-            echo "🚀 Creating new EKS cluster: $CLUSTER_NAME..."
             eksctl create cluster \
               --name "$CLUSTER_NAME" \
               --region "$REGION" \
@@ -89,24 +83,20 @@ jobs:
         run: |
           CLUSTER_NAME="${{ secrets.EKS_CLUSTER_NAME }}"
           REGION="${{ secrets.AWS_REGION }}"
-          echo "⌛ Waiting for cluster to be active..."
           aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
-          echo "🔑 Updating kubeconfig..."
           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
 
       # ✅ Apply MongoDB PVC
       - name: Deploy MongoDB Persistent Volume Claim
         working-directory: vrse-builder-backend-main
-        run: |
-          kubectl apply -f mongodb-pvc.yaml
+        run: kubectl apply -f mongodb-pvc.yaml
 
-      # ✅ Deploy Backend + MongoDB
+      # ✅ Deploy Backend and MongoDB
       - name: Deploy Backend and MongoDB
         working-directory: vrse-builder-backend-main
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          echo "Deploying backend image: $BACKEND_IMAGE:$TAG"
           sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
           kubectl apply -f backend-deployment.yaml
           kubectl apply -f backend-service.yaml
@@ -115,14 +105,12 @@ jobs:
       - name: Install NGINX Ingress Controller
         run: |
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/aws/deploy.yaml
-          echo "⌛ Waiting for ingress controller to be ready..."
           kubectl rollout status deployment ingress-nginx-controller -n ingress-nginx --timeout=180s
 
       # ✅ Install cert-manager
       - name: Install cert-manager
         run: |
           kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-          echo "⌛ Waiting for cert-manager deployments to be ready..."
           kubectl rollout status deployment cert-manager -n cert-manager --timeout=180s
           kubectl rollout status deployment cert-manager-webhook -n cert-manager --timeout=180s
           kubectl rollout status deployment cert-manager-cainjector -n cert-manager --timeout=180s
@@ -132,36 +120,58 @@ jobs:
         working-directory: vrse-builder-backend-main
         run: kubectl apply -f cluster-issuer.yaml
 
-      # ✅ Apply Ingress Resource for HTTPS domain
+      # ✅ Apply Ingress Resource
       - name: Apply Backend Ingress
         working-directory: vrse-builder-backend-main
         run: kubectl apply -f backend-ingress.yaml
 
       # ✅ Show Pod Status
       - name: Show Pod Status
-        run: |
-          echo "📦 Pod Status:"
-          kubectl get pods -l app=backend -o wide
+        run: kubectl get pods -l app=backend -o wide
 
-      # ✅ Show Container Names
-      - name: List Pod Containers
-        run: |
-          echo "📋 Containers in backend pod:"
-          kubectl get pods -l app=backend -o jsonpath='{.items[*].spec.containers[*].name}'
-          echo ""
-
-      # ✅ Backend Container Logs
-      - name: Backend Container Logs
+      # ✅ Backend Logs
+      - name: Backend Logs
         run: |
           POD=$(kubectl get pods -l app=backend \
             -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\n"}{end}' \
              | head -n 1)
-          echo "📄 Backend logs from $POD:"
           kubectl logs "$POD" -c backend --tail=50
 
-        # ✅ Print Final Backend URL
-      - name: ✅ Deployment Complete - Print Backend URL
+      # ✅ Deploy Kubernetes Dashboard
+      - name: Deploy Kubernetes Dashboard
+        run: |
+          echo "📦 Applying Kubernetes Dashboard manifest..."
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+
+          echo "🛡️ Creating admin user..."
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: admin-user
+            namespace: kubernetes-dashboard
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: admin-user
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects:
+          - kind: ServiceAccount
+            name: admin-user
+            namespace: kubernetes-dashboard
+          EOF
+
+      # ✅ Final Message
+      - name: ✅ Deployment Complete
         run: |
           echo "🎉 Backend successfully deployed!"
-          echo "🔗 Access your backend here: https://poc-api.autovrse.app"
-
+          echo "🔗 Visit: https://poc-api.autovrse.app"
+          echo ""
+          echo "📊 To access Kubernetes Dashboard:"
+          echo "👉 Run: kubectl proxy"
+          echo "👉 Open: http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"
+          echo "👉 Get token: kubectl -n kubernetes-dashboard create token admin-user"

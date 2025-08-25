@@ -1,0 +1,7 @@
+apiVersion: v1
+data:
+  mapUsers: |
+    - userarn: arn:aws:iam::133354030153:user/tarkesh@autovrse.in
+      username: tarkesh
+      groups:
+        - system:masters

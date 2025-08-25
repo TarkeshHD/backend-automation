@@ -7,11 +7,6 @@ spec:
     app: backend
   ports:
     - protocol: TCP
-<<<<<<< HEAD
-      port: 80
-      targetPort: 5000
-  type: ClusterIP   # ✅ Change from LoadBalancer → ClusterIP
-=======
-      port: 80            # service port (used by Ingress and curl)
-      targetPort: 3000    # internal container port of your backend app
->>>>>>> 19a7cee3dd0f4a25f8b8b028ef329d9c5d9da81e
+      port: 80           # External service port (used by Ingress or curl)
+      targetPort: 3000   # Internal container port of your backend app
+  type: ClusterIP        # ✅ Use ClusterIP when using Ingress for external access

@@ -56,10 +56,28 @@ jobs:
       id: ensure-default
       run: |
         set -e
+        export AWS_REGION=${{ env.AWS_REGION }}
+    
         VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
-        SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[0].SubnetId' --output text)
-        echo "DEFAULT_VPC_ID=$VPC_ID" >> $GITHUB_OUTPUT
-        echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_OUTPUT
+    
+        if [ "$VPC_ID" = "None" ]; then
+           echo "❌ No default VPC found in region $AWS_REGION"
+           exit 1
+         fi
+
+         SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[0].SubnetId' --output text)
+    
+         if [ "$SUBNET_ID" = "None" ]; then
+           echo "❌ No subnet found in VPC $VPC_ID"
+           exit 1
+         fi
+
+         echo "✅ Default VPC: $VPC_ID"
+         echo "✅ Subnet ID: $SUBNET_ID"
+
+         echo "DEFAULT_VPC_ID=$VPC_ID" >> $GITHUB_OUTPUT
+         echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_OUTPUT
+
 
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role

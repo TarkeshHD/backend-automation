@@ -20,16 +20,18 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ✅ Install eksctl and kubectl
       - name: 🧰 Install eksctl and kubectl
         run: |
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" --output eksctl.tar.gz
+         # ✅ Corrected eksctl download URL
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_linux_amd64.tar.gz" --output eksctl.tar.gz
           tar -xzf eksctl.tar.gz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin
 
-          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
+         # ✅ Install kubectl
+         curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+         chmod +x kubectl
+         sudo mv kubectl /usr/local/bin/
+
 
       # ✅ Update kubeconfig for EKS
       - name: 📡 Update kubeconfig

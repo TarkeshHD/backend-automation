@@ -62,8 +62,9 @@ jobs:
         id: network
         run: |
           VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query 'Vpc.VpcId' --output text)
-          aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support "{"Value":true}"
-          aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames "{"Value":true}"
+           aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-support "{\"Value\":true}"
+           aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-hostnames "{\"Value\":true}"
+
 
           IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' --output text)
           aws ec2 attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID

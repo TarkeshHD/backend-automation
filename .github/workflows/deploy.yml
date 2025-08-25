@@ -12,7 +12,11 @@ on:
         required: true
         default: 't3.micro'
         type: choice
-        options: [t3.micro, t3.small, t3.medium, t3.large]
+        options:
+          - t3.micro
+          - t3.small
+          - t3.medium
+          - t3.large
       instance_name:
         description: 'EC2 Instance Name Tag'
         required: true
@@ -29,16 +33,15 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  AWS_DEFAULT_REGION: us-east-1
   EC2_ROLE_NAME: EC2-CodeDeploy-Role
+  CODEDEPLOY_ROLE_NAME: CodeDeploy-Service-Role
   SECURITY_GROUP_NAME: CodeDeploy-Security-Group
 
 jobs:
   setup-infrastructure:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout Code
+    - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Configure AWS credentials
@@ -48,88 +51,81 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Ensure default VPC and Subnet
-      id: ensure-default
-      run: |
-        set -e
-        VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
-        if [ "$VPC_ID" = "None" ]; then
-          echo "❌ No default VPC found."
-          exit 1
-        fi
-
-        SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[0].SubnetId' --output text)
-        if [ "$SUBNET_ID" = "None" ]; then
-          echo "❌ No subnet found in VPC $VPC_ID"
-          exit 1
-        fi
-
-        echo "DEFAULT_VPC_ID=$VPC_ID" >> $GITHUB_OUTPUT
-        echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_OUTPUT
-
     - name: Create EC2 IAM Role and Instance Profile
       id: ec2-role
       run: |
-        echo '{
+        cat > ec2-trust-policy.json << EOF
+        {
           "Version": "2012-10-17",
-          "Statement": [{
-            "Effect": "Allow",
-            "Principal": { "Service": "ec2.amazonaws.com" },
-            "Action": "sts:AssumeRole"
-          }]
-        }' > trust-policy.json
-
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "Service": "ec2.amazonaws.com" },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+        EOF
         if ! aws iam get-role --role-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
-          aws iam create-role --role-name ${{ env.EC2_ROLE_NAME }} --assume-role-policy-document file://trust-policy.json
-          aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy
+          aws iam create-role \
+            --role-name ${{ env.EC2_ROLE_NAME }} \
+            --assume-role-policy-document file://ec2-trust-policy.json \
+            --description "IAM role for EC2 instances to work with CodeDeploy"
+          aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+          aws iam attach-role-policy --role-name ${{ env.EC2_ROLE_NAME }} --policy-arn arn:aws:iam::aws:policy/AmazonEC2RoleforAWSCodeDeploy
         fi
-
         if ! aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} >/dev/null 2>&1; then
           aws iam create-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }}
-          aws iam add-role-to-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --role-name ${{ env.EC2_ROLE_NAME }}
         fi
-
+        ATTACHED_ROLE=$(aws iam get-instance-profile \
+          --instance-profile-name ${{ env.EC2_ROLE_NAME }} \
+          --query 'InstanceProfile.Roles[0].RoleName' \
+          --output text 2>/dev/null || echo "None")
+        if [ "$ATTACHED_ROLE" != "${{ env.EC2_ROLE_NAME }}" ]; then
+          aws iam add-role-to-instance-profile \
+            --instance-profile-name ${{ env.EC2_ROLE_NAME }} \
+            --role-name ${{ env.EC2_ROLE_NAME }}
+        fi
         PROFILE_ARN=$(aws iam get-instance-profile --instance-profile-name ${{ env.EC2_ROLE_NAME }} --query 'InstanceProfile.Arn' --output text)
         echo "PROFILE_ARN=$PROFILE_ARN" >> $GITHUB_OUTPUT
 
-    - name: Create or Use Existing Security Group
+    - name: Create Security Group
       id: create-sg
       run: |
-        VPC_ID="${{ steps.ensure-default.outputs.DEFAULT_VPC_ID }}"
-        SG_ID=$(aws ec2 describe-security-groups \
-          --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" "Name=vpc-id,Values=$VPC_ID" \
-          --query "SecurityGroups[0].GroupId" --output text)
-
-        if [ "$SG_ID" = "None" ]; then
+        VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
+        EXISTING_SG=$(aws ec2 describe-security-groups \
+          --filters "Name=group-name,Values=${{ env.SECURITY_GROUP_NAME }}" \
+          --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
+        if [ "$EXISTING_SG" != "None" ] && [ "$EXISTING_SG" != "" ]; then
+          echo "SECURITY_GROUP_ID=$EXISTING_SG" >> $GITHUB_OUTPUT
+        else
           SG_ID=$(aws ec2 create-security-group \
             --group-name ${{ env.SECURITY_GROUP_NAME }} \
-            --description "Security group for CodeDeploy" \
+            --description "SG for CodeDeploy" \
             --vpc-id $VPC_ID \
             --query 'GroupId' --output text)
-
           for PORT in 22 80 443 27017; do
-            aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port $PORT --cidr 0.0.0.0/0 || true
+            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port $PORT --cidr 0.0.0.0/0
           done
+          echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
         fi
-
-        echo "SECURITY_GROUP_ID=$SG_ID" >> $GITHUB_OUTPUT
 
     - name: Create EC2 Key Pair
       id: create-key
       run: |
-        KEY_NAME="${{ github.event.inputs.client_name }}-key"
-        if aws ec2 describe-key-pairs --key-names "$KEY_NAME" >/dev/null 2>&1; then
-          echo "Key pair $KEY_NAME already exists. Skipping."
-        else
-          aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$KEY_NAME.pem"
-          chmod 400 "$KEY_NAME.pem"
-        fi
+        KEY_NAME="${{ github.event.inputs.client_name }}-key-$(date +%s)"
+        aws ec2 create-key-pair \
+          --key-name "$KEY_NAME" \
+          --query 'KeyMaterial' \
+          --output text > "${KEY_NAME}.pem"
+        chmod 400 "${KEY_NAME}.pem"
         echo "KEY_NAME=$KEY_NAME" >> $GITHUB_OUTPUT
+      shell: bash
 
-    - name: Upload Private Key
+    - name: Upload Private Key Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ec2-key
+        name: ec2-private-key
         path: ${{ steps.create-key.outputs.KEY_NAME }}.pem
 
     - name: Get Latest Ubuntu AMI
@@ -138,66 +134,123 @@ jobs:
         AMI_ID=$(aws ec2 describe-images \
           --owners 099720109477 \
           --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
-          --query 'Images | sort_by(@, &CreationDate)[-1].ImageId' --output text)
+          --query 'Images|sort_by(@, &CreationDate)[-1].ImageId' \
+          --output text)
         echo "AMI_ID=$AMI_ID" >> $GITHUB_OUTPUT
 
-    - name: Create User Data Script
-      run: |
-        cat << 'EOF' > user-data.sh
-#!/bin/bash
-apt update -y
-apt install -y nginx certbot python3-certbot-nginx nodejs npm git mongodb jq
-
-systemctl enable mongod
-systemctl start mongod
-sleep 10
-
-mongosh <<MONGO
-use admin
-db.createUser({user:"admin", pwd:"admin", roles:["root"]})
-MONGO
-
-sed -i '/#security:/a\security:\n  authorization: "enabled"' /etc/mongod.conf
-systemctl restart mongod
-
-npm install -g pm2
-git clone https://github.com/YOUR_ORG/YOUR_REPO.git
-cd YOUR_REPO
-npm install
-pm2 start server.js --name app
-pm2 save
-pm2 startup systemd
-
-certbot --nginx --non-interactive --agree-tos -d ${{ github.event.inputs.domain_name }} -m ${{ github.event.inputs.email }}
-EOF
-
     - name: Launch EC2 Instance
-      id: launch-ec2
+      id: launch-instance
+      env:
+        GH_USERNAME: ${{ secrets.GH_USERNAME }}
+        GH_PAT: ${{ secrets.GH_PAT }}
+        DOMAIN_NAME: ${{ github.event.inputs.domain_name }}
+        EMAIL: ${{ github.event.inputs.email }}
       run: |
+        cat > user-data.sh << 'EOF'
+        #!/bin/bash
+
+        # Set environment variables
+        echo 'export ENV_VAR1="val1"' | sudo tee -a /etc/profile
+        echo 'export ENV_VAR2="val2"' | sudo tee -a /etc/profile
+        source /etc/profile
+
+        sudo apt-get update -y
+        sudo apt-get install -y ruby wget curl gnupg git nginx software-properties-common
+
+        # CodeDeploy Agent
+        cd /home/ubuntu
+        wget https://aws-codedeploy-${AWS_REGION}.s3.${AWS_REGION}.amazonaws.com/latest/install
+        chmod +x ./install
+        ./install auto
+        sudo service codedeploy-agent start
+
+        # Node.js
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+
+        # MongoDB
+        curl -fsSL https://pgp.mongodb.com/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+        echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+        sudo apt-get update -y
+        sudo apt-get install -y mongodb-org
+        sudo systemctl enable mongod
+        sudo systemctl start mongod
+        sleep 10
+
+        mongosh <<EOF2
+        use admin
+        db.createUser({user: "admin", pwd: "admin", roles: ["userAdminAnyDatabase", "dbAdminAnyDatabase", "readWriteAnyDatabase"]});
+        use vrseBuilder
+        db.createUser({user: "admin", pwd: "admin", roles: ["userAdmin", "dbAdmin", "readWrite"]});
+        EOF2
+        sudo sed -i '/#security:/a\security:\n  authorization: "enabled"' /etc/mongod.conf
+        sudo systemctl restart mongod
+
+        # Clone repo
+        GH_USER="${GH_USERNAME}"
+        GH_TOKEN="${GH_PAT}"
+        REPO_NAME="your-repository"
+        BRANCH="main"
+        sudo git clone -b $BRANCH https://$GH_USER:$GH_TOKEN@github.com/$GH_USER/$REPO_NAME.git
+        sudo chown -R ubuntu:ubuntu $REPO_NAME
+
+        cd /home/ubuntu/$REPO_NAME
+        npm install
+
+        # PM2
+        sudo npm install -g pm2
+        pm2 start server.js --name "my-app" --update-env
+        pm2 startup systemd -u ubuntu --hp /home/ubuntu
+        pm2 save
+
+        # Nginx with HTTPS redirect
+        sudo bash -c "cat > /etc/nginx/sites-available/default" <<NGINXCONF
+        server {
+            listen 80;
+            server_name ${DOMAIN_NAME};
+            return 301 https://\$host\$request_uri;
+        }
+        server {
+            listen 443 ssl;
+            server_name ${DOMAIN_NAME};
+            client_max_body_size 30M;
+
+            ssl_certificate /etc/letsencrypt/live/${DOMAIN_NAME}/fullchain.pem;
+            ssl_certificate_key /etc/letsencrypt/live/${DOMAIN_NAME}/privkey.pem;
+
+            location / {
+                proxy_pass http://localhost:5000;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade \$http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host \$host;
+                proxy_cache_bypass \$http_upgrade;
+                proxy_set_header X-Real-IP \$remote_addr;
+                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto \$scheme;
+            }
+        }
+        NGINXCONF
+        sudo nginx -t && sudo systemctl restart nginx
+
+        # SSL Certbot
+        sudo add-apt-repository -y ppa:certbot/certbot
+        sudo apt-get update -y
+        sudo apt-get install -y python3-certbot-nginx
+        sudo certbot --nginx -d ${DOMAIN_NAME} --non-interactive --agree-tos -m ${EMAIL}
+        sudo certbot renew --dry-run
+        EOF
+
         INSTANCE_ID=$(aws ec2 run-instances \
           --image-id ${{ steps.get-ami.outputs.AMI_ID }} \
           --count 1 \
           --instance-type ${{ github.event.inputs.instance_type }} \
           --key-name ${{ steps.create-key.outputs.KEY_NAME }} \
-          --subnet-id ${{ steps.ensure-default.outputs.SUBNET_ID }} \
           --security-group-ids ${{ steps.create-sg.outputs.SECURITY_GROUP_ID }} \
           --iam-instance-profile Arn=${{ steps.ec2-role.outputs.PROFILE_ARN }} \
           --user-data file://user-data.sh \
-          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}}]" \
-          --query 'Instances[0].InstanceId' --output text)
-
+          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ github.event.inputs.instance_name }}},{Key=Environment,Value=Development},{Key=Project,Value=CodeDeploy}]" \
+          --query 'Instances[0].InstanceId' \
+          --output text)
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
         aws ec2 wait instance-running --instance-ids $INSTANCE_ID
-
-    - name: Allocate and Associate Elastic IP
-      run: |
-        ALLOC_ID=$(aws ec2 allocate-address --domain vpc --query 'AllocationId' --output text)
-        PUBLIC_IP=$(aws ec2 describe-addresses --allocation-ids $ALLOC_ID --query 'Addresses[0].PublicIp' --output text)
-
-        aws ec2 associate-address \
-          --instance-id ${{ steps.launch-ec2.outputs.INSTANCE_ID }} \
-          --allocation-id $ALLOC_ID
-
-        echo "::notice title=DNS Setup::Map A-record '${{ github.event.inputs.domain_name }}' → $PUBLIC_IP"
-        echo "EC2 Instance ID: ${{ steps.launch-ec2.outputs.INSTANCE_ID }}"
-        echo "Elastic IP: $PUBLIC_IP"

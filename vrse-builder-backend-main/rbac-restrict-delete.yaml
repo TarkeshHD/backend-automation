@@ -1,0 +1,24 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: default
+  name: mongodb-restrict-delete
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    resourceNames: ["mongodb"]
+    verbs: ["get", "list", "watch"]  # ❌ no delete permission
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongodb-restrict-delete-binding
+  namespace: default
+subjects:
+  - kind: User
+    name: developer-user  # non-admin user
+roleRef:
+  kind: Role
+  name: mongodb-restrict-delete
+  apiGroup: rbac.authorization.k8s.io

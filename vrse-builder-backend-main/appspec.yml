@@ -1,0 +1,14 @@
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /home/ubuntu/vrse-builder-backend
+hooks:
+  BeforeInstall:
+    - location: deployment/scripts/remove_directory.sh
+      timeout: 300
+      runas: ubuntu
+  ApplicationStart:
+    - location: deployment/scripts/start_server.sh
+      timeout: 300
+      runas: ubuntu

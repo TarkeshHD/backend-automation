@@ -1,0 +1,83 @@
+name: Deploy Backend to EKS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: us-east-1
+      CLUSTER_NAME: Backend-cluster
+      CERT_MANAGER_VERSION: v1.14.4
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+
+      - name: Wait for DNS propagation
+        run: |
+          echo "Waiting for DNS to propagate..."
+          sleep 120
+
+      - name: Install cert-manager
+        run: |
+          if ! kubectl get ns cert-manager >/dev/null 2>&1; then
+            echo "Installing cert-manager..."
+            kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml
+            kubectl rollout status deployment/cert-manager -n cert-manager --timeout=180s
+            kubectl rollout status deployment/cert-manager-webhook -n cert-manager --timeout=180s
+          else
+            echo "cert-manager already installed"
+          fi
+
+      - name: Apply ClusterIssuer
+        run: kubectl apply -f vrse-builder-backend-main/cluster-issuer.yaml
+
+      - name: Deploy MongoDB
+        run: |
+          kubectl apply -f vrse-builder-backend-main/mongodb-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/mongodb-service.yaml
+
+      - name: Deploy Backend
+        run: |
+          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-service.yaml
+          kubectl apply -f vrse-builder-backend-main/backend-ingress.yaml
+
+      - name: Wait for backend deployment
+        run: |
+          echo "Waiting for backend rollout..."
+          kubectl rollout status deployment/backend-deployment --timeout=300s
+
+      - name: Wait for TLS certificate
+        run: |
+          echo "Waiting for TLS certificate to be issued..."
+          for i in {1..30}; do
+            STATUS=$(kubectl get certificate -A | grep backend-tls || true)
+            if [[ "$STATUS" == *"True"* ]]; then
+              echo "✅ TLS Certificate ready"
+              break
+            fi
+            echo "Waiting..."
+            sleep 20
+          done
+
+      - name: Get Backend Ingress URL
+        run: |
+          INGRESS_IP=$(kubectl get ingress backend-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "Backend is live at: https://$INGRESS_IP"
+          echo "BACKEND_URL=https://$INGRESS_IP" >> $GITHUB_ENV

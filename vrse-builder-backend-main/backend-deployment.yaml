@@ -5,11 +5,7 @@ metadata:
   labels:
     app: backend
 spec:
-<<<<<<< HEAD
-  replicas: 2
-=======
   replicas: 1
->>>>>>> 19a7cee3dd0f4a25f8b8b028ef329d9c5d9da81e
   selector:
     matchLabels:
       app: backend
@@ -19,80 +15,13 @@ spec:
         app: backend
     spec:
       containers:
-<<<<<<< HEAD
-        # ✅ Backend Container
-        - name: backend-container
-          image: tarkesh/backend:latest
-          ports:
-            - containerPort: 5000
-          env:
-            - name: NODE_ENV
-              value: "production"
-            - name: MONGODB_USER
-              value: "admin"
-            - name: MONGODB_PASSWORD
-              value: "admin"
-            - name: MONGODB_HOST
-              value: "mongodb-service"
-            - name: MONGODB_PORT
-              value: "27017"
-            - name: MONGODB_DB_NAME
-              value: "vrseBuilder"
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "250m"
-            limits:
-              memory: "512Mi"
-              cpu: "500m"
-
-
-
-
----
-# ✅ Service for Backend
-apiVersion: v1
-kind: Service
-metadata:
-  name: backend-service
-spec:
-  selector:
-    app: backend
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: 5000
-  type: LoadBalancer
-
-
-=======
         - name: backend
-          image: 133354030153.dkr.ecr.us-east-1.amazonaws.com/backend
+          image: 133354030153.dkr.ecr.us-east-1.amazonaws.com/backend:latest
           ports:
             - containerPort: 3000
-          env:
-            - name: NODE_ENV
-              value: production
-            - name: PORT
-              value: "3000"
-            - name: APP_DOMAIN
-              value: "poc-api.autovrse.app"
-            - name: WEB_DOMAIN
-              value: "https://poc.autovrse-training.com/"         # ✅ Update this to your actual frontend domain
-            - name: APP_JWT_KEY
-              value: "test-jwt-secret"                   # ✅ Use a real secure secret in production
-            - name: JWT_KEY_FOR_INVITE
-              value: "invite-jwt-secret"
-            - name: MONGODB_USER
-              value: admin
-            - name: MONGODB_PASSWORD
-              value: admin
-            - name: MONGODB_HOST
-              value: mongodb
-            - name: MONGODB_PORT
-              value: "27017"
-            - name: MONGODB_DB_NAME
-              value: vrse
+          envFrom:
+            - secretRef:
+                name: backend-secret
 
         - name: mongodb
           image: mongo:6.0
@@ -111,4 +40,3 @@ spec:
         - name: mongo-storage
           persistentVolumeClaim:
             claimName: mongodb-pvc
->>>>>>> 19a7cee3dd0f4a25f8b8b028ef329d9c5d9da81e

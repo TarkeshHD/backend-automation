@@ -112,15 +112,16 @@ jobs:
         working-directory: vrse-builder-backend-main
         run: kubectl apply -f backend-secret.yaml
 
-      # ✅ Deploy Backend and MongoDB
-      - name: Deploy Backend and MongoDB
-        working-directory: vrse-builder-backend-main
+      - name: Deploy Backend
         run: |
           BACKEND_IMAGE="${{ steps.login-ecr.outputs.registry }}/backend"
           TAG="${GITHUB_SHA::7}"
-          sed -i "s|image: .*|image: $BACKEND_IMAGE:$TAG|" backend-deployment.yaml
-          kubectl apply -f backend-deployment.yaml
-          kubectl apply -f backend-service.yaml
+          echo "Deploying backend: $BACKEND_IMAGE:$TAG"
+
+          kubectl apply -f vrse-builder-backend-main/backend-deployment.yaml
+          kubectl set image deployment/backend-deployment backend=$BACKEND_IMAGE:$TAG
+          kubectl apply -f vrse-builder-backend-main/backend-service.yaml
+
 
       # ✅ Install NGINX Ingress Controller
       - name: Install NGINX Ingress Controller

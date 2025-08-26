@@ -22,6 +22,15 @@ spec:
           envFrom:
             - secretRef:
                 name: backend-secret
+          readinessProbe:
+            exec:
+              command:
+                - mongo
+                - --eval
+                - db.adminCommand('ping')
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
 
         - name: mongodb
           image: mongo:6.0
@@ -41,11 +50,4 @@ spec:
           persistentVolumeClaim:
             claimName: mongodb-pvc
 
-      readinessProbe:
-            exec:
-              command:
-                - mongo
-                - --eval
-                - db.adminCommand('ping')
-            initialDelaySeconds: 5
-            periodSeconds: 10
+      

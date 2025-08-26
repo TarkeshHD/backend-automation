@@ -46,6 +46,10 @@ jobs:
         with:
           node-version: 16.16.0
 
+      - name: Install Node Dependencies
+        working-directory: vrse-builder-backend-main
+        run: npm install
+
 
       - name: Check Node and NPM Version
         run: |

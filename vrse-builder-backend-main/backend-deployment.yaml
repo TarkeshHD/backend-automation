@@ -40,3 +40,12 @@ spec:
         - name: mongo-storage
           persistentVolumeClaim:
             claimName: mongodb-pvc
+
+      readinessProbe:
+            exec:
+              command:
+                - mongo
+                - --eval
+                - db.adminCommand('ping')
+            initialDelaySeconds: 5
+            periodSeconds: 10

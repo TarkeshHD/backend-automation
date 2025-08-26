@@ -41,6 +41,12 @@ jobs:
           fi
 
 
+      - name: Setup Node.js 16.16.0
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16.16.0
+
+
       - name: Check Node and NPM Version
         run: |
           node -v

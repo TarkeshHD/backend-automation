@@ -41,15 +41,11 @@ jobs:
           fi
 
 
-      # ✅ Setup Node.js 16.16.0 and install dependencies
-      - name: Setup Node.js 16.16.0
-        uses: actions/setup-node@v3
-        with:
-           node-version: 16.16.0
+      - name: Check Node and NPM Version
+        run: |
+          node -v
+          npm -v
 
-      - name: Install Node Dependencies
-        working-directory: vrse-builder-backend-main
-        run: npm install
 
       # ✅ Build and Push Docker image
       - name: Build and Push Backend Docker image

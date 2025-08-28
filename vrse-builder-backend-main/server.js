@@ -108,6 +108,11 @@ app.use((req, res, next) => {
 /* Routes */
 app.use(routes);
 
+/* Health check route for Kubernetes readinessProbe */
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
 /* 404 Handler */
 app.use((req, res, next) => {
   next(

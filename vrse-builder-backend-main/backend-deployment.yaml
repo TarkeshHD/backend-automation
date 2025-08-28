@@ -23,13 +23,12 @@ spec:
             - secretRef:
                 name: backend-secret
           readinessProbe:
-            exec:
-              command:
-                - mongo
-                - --eval
-                - db.adminCommand('ping')
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            httpGet:
+              path: /health
+              port: 3000
+           initialDelaySeconds: 10
+           periodSeconds: 10
+           failureThreshold: 3
 
 
         - name: mongodb

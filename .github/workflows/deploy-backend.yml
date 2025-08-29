@@ -109,7 +109,10 @@ jobs:
           echo "🔁 Applying aws-auth ConfigMap..."
           kubectl apply -f aws-auth.yaml
 
-      
+      # ✅ Install Amazon EBS CSI Driver for dynamic volume provisioning
+      - name: Install Amazon EBS CSI Driver
+        run: |
+          kubectl apply -k "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/?ref=release-1.28"
 
       # ✅ Apply MongoDB PVC
       - name: Deploy MongoDB PVC

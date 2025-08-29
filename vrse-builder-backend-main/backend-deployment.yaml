@@ -40,6 +40,8 @@ spec:
               value: admin
             - name: MONGO_INITDB_ROOT_PASSWORD
               value: admin
+            - name: MONGO_INITDB_DATABASE
+              value: vrseBuilder
           volumeMounts:
             - mountPath: /data/db
               name: mongo-storage

@@ -117,9 +117,7 @@ jobs:
       # ✅ Apply MongoDB PVC
       - name: Deploy MongoDB PVC
         working-directory: vrse-builder-backend-main
-        run: |
-          kubectl delete pvc mongodb-pvc --ignore-not-found
-          kubectl apply -f mongodb-pvc.yaml
+        run: kubectl apply -f mongodb-pvc.yaml
 
       # ✅ Apply backend-secret.yaml (your user-data.sh env vars)
       - name: Apply Backend Environment Secrets

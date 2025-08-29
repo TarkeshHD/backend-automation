@@ -102,6 +102,14 @@ jobs:
           aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$REGION"
           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
 
+      # ✅ Map IAM Roles using aws-auth.yaml
+      - name: Apply aws-auth ConfigMap
+        working-directory: vrse-builder-backend-main
+        run: |
+          echo "🔁 Applying aws-auth ConfigMap..."
+          kubectl apply -f aws-auth.yaml
+
+
       # ✅ Apply MongoDB PVC
       - name: Deploy MongoDB PVC
         working-directory: vrse-builder-backend-main

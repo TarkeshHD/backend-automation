@@ -109,6 +109,23 @@ jobs:
           echo "🔁 Applying aws-auth ConfigMap..."
           kubectl apply -f aws-auth.yaml
 
+        # ✅ Apply gp2-immediate StorageClass
+      - name: Apply gp2-immediate StorageClass
+        working-directory: vrse-builder-backend-main
+        run: |
+          kubectl apply -f gp2-immediate.yaml
+
+      # ✅ Delete existing mongo PVC (if stuck)
+      - name: Delete old mongo PVC if stuck
+        continue-on-error: true
+        run: kubectl delete pvc mongo-pvc || true
+
+      # ✅ Apply MongoDB PVC
+      - name: Deploy MongoDB PVC
+        working-directory: vrse-builder-backend-main
+        run: kubectl apply -f mongodb-pvc.yaml
+
+      
 
       # ✅ Apply MongoDB PVC
       - name: Deploy MongoDB PVC

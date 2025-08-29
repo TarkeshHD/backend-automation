@@ -109,12 +109,18 @@ jobs:
           echo "🔁 Applying aws-auth ConfigMap..."
           kubectl apply -f aws-auth.yaml
 
-        # ✅ Apply Static PV for MongoDB
+      # ✅ Apply Static PV for MongoDB
       - name: Apply Static MongoDB PersistentVolume
         working-directory: vrse-builder-backend-main
         run: |
           echo "📦 Applying mongo-static-pv.yaml"
           kubectl apply -f mongo-static-pv.yaml
+
+
+      # ✅ Delete existing mongo PVC (if stuck)
+      - name: Delete old mongo PVC if stuck
+        continue-on-error: true
+        run: kubectl delete pvc mongo-pvc || true
       
 
       # ✅ Apply MongoDB PVC
